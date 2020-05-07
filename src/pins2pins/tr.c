@@ -72,6 +72,62 @@ find_disabled(tr_context_t *por, int a)
     return -1;
 }
 
+
+typedef struct queue_item_s {
+	int data;
+	struct queue_item_s* next;
+	struct queue_item_s* prev;
+} queue_item_t;
+
+typedef struct queue_s {
+	queue_item_t* front;
+	queue_item_t* back;
+	int size;
+} queue_t;
+
+queue_t* new_queue() {
+	queue_t* q = (queue_t*) malloc(sizeof(queue_t));
+
+	q->front = q->back = 0;
+	q->size = 0;
+
+	return q;
+}
+
+
+int top(queue_t* q) {
+	if(q->size <= 0) return -1;
+	return q->front->data;
+}
+
+void pop(queue_t* q) {
+	if(q->size <= 0) return;
+	
+	queue_item_t* tmp = q->front->prev;
+	free(q->front);
+	q->front = tmp;
+	q->size--;	
+}
+
+void push(queue_t* q, int d) {
+	queue_item_t* to_insert = malloc(sizeof(queue_item_t));
+	to_insert->data = d;
+	to_insert->prev = q->front;
+	q->front->next = to_insert;
+	q->front = to_insert;
+}
+
+
+queue_t** get_CVs(int nprocs, bool* infinite) {
+	queue_t** CVs = (queue_t**) malloc(nprocs*sizeof(queue_t*));
+	for(int i = 0; i < nprocs; i++) {
+		CVs[i] = new_queue();
+	}
+
+	return CVs;
+}
+
+
 /**
  * Emits subset of ations to search algorithm
  */
@@ -123,7 +179,8 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 model_t
 pins2pins_tr (model_t model)
 {
-    if (!pins_has_guards(model)) {
+    fprintf(stderr, "testertst/\n");
+	if (!pins_has_guards(model)) {
         Abort ("Frontend doesn't have guards. Ignoring --por.");
     }
 
