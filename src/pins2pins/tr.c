@@ -23,23 +23,17 @@ typedef enum {
 
 typedef struct tr_ctx {
     model_t         model;
-    size_t          nguards;  // number of guards (groups)
-    size_t          nactions; // number of actions (groups)
     size_t          nslots;   // number of variables in state vector
-    list_t          **ncommute; // dna[a] is a list of not commuting actions for action a
-    list_t          **nes;      // nes[g] is a list of NES actions for guard g
-
-    status_t       *guard_status;   // guard enabled or disabled
-    status_t       *action_status;  // action enabled or disabled
-
-    // for search over ations:
-    list_t         *queued;
-    bool           *action_selected;// action selected or not
+	size_t			nactions;
+	size_t 			nguards;
 
     process_t          *procs;
     int                *g2p;
     size_t              num_procs;
     dfs_stack_t        *queue[2];
+
+	status_t       *guard_status;   // guard enabled or disabled
+    status_t       *action_status;  // action enabled or disabled
 
     // for callback
     TransitionCB    cb_org;
@@ -50,12 +44,9 @@ typedef struct tr_ctx {
 void
 tr_cb_filter (void *context, transition_info_t *ti, int *dst, int *cpy)
 {
-    int action = ti->group;
     tr_context_t *por = (tr_context_t*) context;
-    if (por->action_selected[action]) {
-        por->cb_org(por->ctx_org, ti, dst, cpy);
-        por->emitted++;
-    }
+    por->cb_org(por->ctx_org, ti, dst, cpy);
+    por->emitted++;
 }
 
 static inline int
@@ -73,61 +64,7 @@ find_disabled(tr_context_t *por, int a)
 }
 
 
-typedef struct queue_item_s {
-	int data;
-	struct queue_item_s* next;
-	struct queue_item_s* prev;
-} queue_item_t;
-
-typedef struct queue_s {
-	queue_item_t* front;
-	queue_item_t* back;
-	int size;
-} queue_t;
-
-queue_t* new_queue() {
-	queue_t* q = (queue_t*) malloc(sizeof(queue_t));
-
-	q->front = q->back = 0;
-	q->size = 0;
-
-	return q;
-}
-
-
-int top(queue_t* q) {
-	if(q->size <= 0) return -1;
-	return q->front->data;
-}
-
-void pop(queue_t* q) {
-	if(q->size <= 0) return;
-	
-	queue_item_t* tmp = q->front->prev;
-	free(q->front);
-	q->front = tmp;
-	q->size--;	
-}
-
-void push(queue_t* q, int d) {
-	queue_item_t* to_insert = malloc(sizeof(queue_item_t));
-	to_insert->data = d;
-	to_insert->prev = q->front;
-	q->front->next = to_insert;
-	q->front = to_insert;
-}
-
-
-queue_t** get_CVs(int nprocs, bool* infinite) {
-	queue_t** CVs = (queue_t**) malloc(nprocs*sizeof(queue_t*));
-	for(int i = 0; i < nprocs; i++) {
-		CVs[i] = new_queue();
-	}
-
-	return CVs;
-}
-
-
+#define MAX_CV_SIZE 128
 /**
  * Emits subset of ations to search algorithm
  */
@@ -137,39 +74,25 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
 	// read state label values (including guards)
     GBgetStateLabelsAll(tr->model, src, (int *) tr->guard_status);
-    
-	list_t* coveredset = list_create(tr->nactions);
-	list_t* workset = list_create(tr->nactions);
-	
-	for (int a = 0; a < tr->nactions; a++) {            // actions
-        tr->action_status[a] = find_disabled(tr, a) == -1; // set action enabledness
-        // enable one action
-		if (tr->action_status[a] && list_count(tr->queued) == 0) {
-            list_add (tr->queued, a);
-			list_add (workset, a);
-            tr->action_selected[a] = true;
-        }
-    }
+	for (int a = 0; a < tr->nactions; a++) {
+    	tr->action_status[a] = find_disabled(tr, a) == -1; // disabled?
+    }    
 
-	while(list_count(workset) > 0) {
-		// get an item from the workset
-		int cur = list_top(workset);
-		list_pop(workset);
-		if(list_find(coveredset, cur) == -1) {
+	// CV ALGO
+	// ===========================================================================
+	// Add first transition for all processes
+	for(int i = 0; i < tr->num_procs; i++) {
+		for(int j = 0; j < list_count(tr->procs[i].groups); j++) {
+			int group = list_get(tr->procs->groups, j);
 		}
-
 	}
-
-
-	// Cleanup
-	list_free(coveredset);
-	list_free(workset);
+	// ===========================================================================
 
     // Forward the next selected successor states to the algorithm:
     tr->cb_org = cb;
     tr->ctx_org = ctx;
     tr->emitted = 0;
-    GBgetTransitionsAll (tr->model, src, tr_cb_filter, (void *)tr);
+    GBgetTransitionsAll(tr->model, src, tr_cb_filter, (void *)tr);
     return tr->emitted;
 }
 
@@ -187,47 +110,28 @@ pins2pins_tr (model_t model)
     tr_context_t *tr = malloc(sizeof *tr);
     tr->model = model;
     tr->nactions = pins_get_group_count(model);
-    tr->nguards = GBgetStateLabelGroupInfo(model, GB_SL_GUARDS)->count;
+	tr->nguards = GBgetStateLabelGroupInfo(model, GB_SL_GUARDS)->count;
     tr->nslots = pins_get_state_variable_count (model);
     tr->guard_status = malloc(sizeof(status_t[pins_get_state_label_count(model)]));
     tr->action_status = malloc(sizeof(status_t[tr->nactions]));
 
     Print ("Number of actions: %zu", tr->nactions);
-    Print ("Number of guards: %zu / %zu state labels", tr->nguards, pins_get_state_label_count(model));
 
-    tr->action_selected = malloc(sizeof(bool[tr->nactions]));
-    tr->queued = list_create (tr->nactions);
-
-    matrix_t *dna = GBgetDoNotAccordInfo(model); // non-commuting actions
-    Assert (dm_nrows(dna) == tr->nactions && dm_ncols(dna) == tr->nactions);
-    tr->ncommute = (list_t **) dm_rows_to_idx_table (dna);
-
-    matrix_t *nes = GBgetGuardNESInfo(model); // non-commuting actions
-    Assert (dm_nrows(nes) == pins_get_state_label_count(model) &&
-            dm_ncols(nes) == tr->nactions);
-    tr->nes = (list_t **) dm_rows_to_idx_table (nes);
-
-
-    tr->g2p = RTmallocZero (sizeof(int[tr->nactions]));
     tr->procs = identify_procs (model, &tr->num_procs, tr->g2p);
-    tr->queue[0] = dfs_stack_create (tr->nslots);
-    tr->queue[1] = dfs_stack_create (tr->nslots);
-
-    // create fresh PINS model
-    model_t             pormodel = GBcreateBase ();
+    
+	// create fresh PINS model
+    model_t pormodel = GBcreateBase ();
 
     // set POR as new context
-    GBsetContext (pormodel, tr);
+    GBsetContext(pormodel, tr);
     // set por next state function
-    GBsetNextStateAll   (pormodel, tr_next_all);
+    GBsetNextStateAll(pormodel, tr_next_all);
 
     // copy all the other data from the original model
-    GBinitModelDefaults (&pormodel, model);
-    int                 s0[tr->nslots];
-    GBgetInitialState (model, s0);
-    GBsetInitialState (pormodel, s0);
-
-	fprintf(stdout, "lolol");
+    GBinitModelDefaults(&pormodel, model);
+    int s0[tr->nslots];
+    GBgetInitialState(model, s0);
+    GBsetInitialState(pormodel, s0);
 
     return pormodel;
 }
