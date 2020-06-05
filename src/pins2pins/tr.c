@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
 #include <aux/options.h>
 #include <dm/dm.h>
 #include <syntax/ltsmin-standard.h>
@@ -15,6 +14,9 @@
 #include <util/list.h>
 #include <util/runtime.h>
 #include <util/util.h>
+#define MAX_CV_SIZE 64
+#define MAX_N_PROCS 64
+
 
 typedef enum {
     Disabled = 0,
@@ -35,6 +37,10 @@ typedef struct tr_ctx {
 	status_t       *guard_status;   // guard enabled or disabled
     status_t       *action_status;  // action enabled or disabled
 
+	// Saves the cartesian vectors
+	int*** CVs;
+	list_t* tmp_next;
+
     // for callback
     TransitionCB    cb_org;
     void           *ctx_org;
@@ -42,12 +48,19 @@ typedef struct tr_ctx {
 } tr_context_t;
 
 void
+tr_next_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
+	tr_context_t *tr = (tr_context_t*) context;
+	list_add(tr->tmp_next, )
+}
+
+void
 tr_cb_filter (void *context, transition_info_t *ti, int *dst, int *cpy)
 {
-    tr_context_t *por = (tr_context_t*) context;
-    por->cb_org(por->ctx_org, ti, dst, cpy);
-    por->emitted++;
+    tr_context_t *tr = (tr_context_t*) context;
+    tr->cb_org(tr->ctx_org, ti, dst, cpy);
+    tr->emitted++;
 }
+
 
 static inline int
 find_disabled(tr_context_t *por, int a)
@@ -64,10 +77,6 @@ find_disabled(tr_context_t *por, int a)
 }
 
 
-#define MAX_CV_SIZE 128
-/**
- * Emits subset of ations to search algorithm
- */
 int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
@@ -80,12 +89,11 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 
 	// CV ALGO
 	// ===========================================================================
+	int* proc_idx;
 	// Add first transition for all processes
-	for(int i = 0; i < tr->num_procs; i++) {
-		for(int j = 0; j < list_count(tr->procs[i].groups); j++) {
-			int group = list_get(tr->procs->groups, j);
-		}
-	}
+		
+		
+	
 	// ===========================================================================
 
     // Forward the next selected successor states to the algorithm:
@@ -114,6 +122,11 @@ pins2pins_tr (model_t model)
     tr->nslots = pins_get_state_variable_count (model);
     tr->guard_status = malloc(sizeof(status_t[pins_get_state_label_count(model)]));
     tr->action_status = malloc(sizeof(status_t[tr->nactions]));
+	
+	tr->CVs = (int***) malloc(MAX_N_PROCS * sizeof(int**));
+	for(int i = 0; i < MAX_N_PROCS; i++) {
+		tr->CVs[i] = (int**) malloc(MAX_CV_SIZE * sizeof(int*));
+	}
 
     Print ("Number of actions: %zu", tr->nactions);
 
