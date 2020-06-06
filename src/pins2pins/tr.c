@@ -73,8 +73,29 @@ typedef struct tr_ctx {
 // }
 
 
-bool commute_last(int CV1, int CV2, tr_context_t* tr) {
-    return false;
+int commute_last(int CV1, int CV2, tr_context_t* tr, bool* extendable) {
+    bool commute = true;
+    int nc_count = 0;
+
+    if(!(extendable[CV1] || extendable[CV2])) return 0;
+
+    //TODO: check commute
+
+    //TEST: REMOVE LATER:
+    commute = false;
+
+    if(!commute) {
+        if(extendable[CV1] == true) {
+            extendable[CV1] = false;
+            nc_count++;
+        }
+        if(extendable[CV2] == true) {
+            extendable[CV2] = false;
+            nc_count++;
+        }
+    }
+
+    return nc_count;
 }
 
 bool commute_notlast(int CV1, int CV2, tr_context_t* tr) {
@@ -122,18 +143,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     for(int i = 0; i < tr->num_procs; i++) {
         for(int j = 0; j < tr->num_procs; j++) {
             if(i != j) {
-                if(extendable[i] || extendable[j]) {
-                    if(!commute_last(i, j, tr)) {
-                        if(extendable[i] == true) {
-                            extendable[i] = false;
-                            extendable_count--;
-                        }
-                        if(extendable[j] == true) {
-                            extendable[j] = false;
-                            extendable_count--;
-                        }
-                    }
-                }
+                extendable_count -= commute_last(i, j, tr, extendable);
             }
         }
     }
