@@ -25,6 +25,11 @@ typedef enum {
 } status_t;
 
 
+typedef struct CV_elem_s {
+    int* state;
+    int transition;
+} CV_elem_t;
+
 typedef struct tr_ctx {
     model_t         model;
     size_t          nslots;   // number of variables in state vector
@@ -37,9 +42,9 @@ typedef struct tr_ctx {
     dfs_stack_t*    queue[2];
 
 	// Saves the cartesian vectors
-	int***          CV_S; // Saves states
-    int**           CV_T; // Saves transitions
+	CV_elem_t**     CVs; // Saves states and transitions
     int*            CV_lens;
+    // Temp storage for callback
 	dfs_stack_t*    state_stack;
     list_t*         trans_stack;
 
@@ -51,6 +56,8 @@ typedef struct tr_ctx {
     void*           ctx_org;
     size_t          emitted;
 } tr_context_t;
+
+
 
 // int*
 // get_procgroup_map(tr_context_t* tr) {
@@ -66,9 +73,13 @@ typedef struct tr_ctx {
 // }
 
 
-// bool commuteLast(int** CV1, int** CV2, g) {
-//     return true;
-// }
+bool commute_last(int CV1, int CV2, tr_context_t* tr) {
+    return false;
+}
+
+bool commute_notlast(int CV1, int CV2, tr_context_t* tr) {
+    return false;
+}
 
 
 void
@@ -93,13 +104,49 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
 	// CV ALGO
 	// ===========================================================================
+    bool* extendable = (bool*) malloc(tr->num_procs * sizeof(bool));
+    int extendable_count = tr->num_procs;
+
     // Add first next state for all processes
     for(int i = 0; i < tr->num_procs; i++) {
+        extendable[i] = true;
         tr->CV_lens[i] = 1;
         nextStateProc(self, tr, src, i, ctx);
-        // stack should be empty after this statement
-        tr->CV_S[i][0] = dfs_stack_pop(tr->state_stack);
-        tr->CV_T[i][0] = list_pop(tr->trans_stack);
+        // stacks should be empty after this statement
+        tr->CVs[i][tr->CV_lens[i]++] = (CV_elem_t) {
+            .state = dfs_stack_pop(tr->state_stack),
+            .transition = list_pop(tr->trans_stack)
+        };
+    }
+    // Check whether lasts commute
+    for(int i = 0; i < tr->num_procs; i++) {
+        for(int j = 0; j < tr->num_procs; j++) {
+            if(i != j) {
+                if(extendable[i] || extendable[j]) {
+                    if(!commute_last(i, j, tr)) {
+                        if(extendable[i] == true) {
+                            extendable[i] = false;
+                            extendable_count--;
+                        }
+                        if(extendable[j] == true) {
+                            extendable[j] = false;
+                            extendable_count--;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    int cur = 0;
+    while(extendable_count > 0) {
+        while(!extendable[cur]) { cur++; }
+        nextStateProc(self, tr, tr->CVs[cur][tr->CV_lens[cur]-1].state, cur, ctx);
+        tr->CVs[cur][tr->CV_lens[cur]++] = (CV_elem_t) {
+            .state = dfs_stack_pop(tr->state_stack),
+            .transition = list_pop(tr->trans_stack)
+        };
+
     }
 
 
@@ -128,21 +175,17 @@ pins2pins_tr (model_t model)
     tr->model = model;
     tr->nactions = pins_get_group_count(model);
     tr->nslots = pins_get_state_variable_count (model);
+    tr->procs = identify_procs(model, &tr->num_procs, tr->g2p);
     Print ("Number of actions: %zu", tr->nactions);
 
 
     // Allocate space for cartesian vectors
-	tr->CV_S = (int***) malloc(MAX_N_PROCS * sizeof(int**));
-    tr->CV_T = (int**) malloc(MAX_N_PROCS * sizeof(int*));
-    tr->CV_lens = (int*) malloc(MAX_N_PROCS * sizeof(int));
-	for(int i = 0; i < MAX_N_PROCS; i++) {
-		tr->CV_S[i] = (int**) malloc(MAX_CV_SIZE * sizeof(int*));
-        tr->CV_T[i] = (int*) malloc(MAX_CV_SIZE * sizeof(int));
-	}
+	tr->CVs = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
+    for(int i = 0; i < MAX_N_PROCS; i++) {
+        tr->CVs[i] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
+    }
 
-    tr->procs = identify_procs(model, &tr->num_procs, tr->g2p);
-    // Create a (group -> process) mapping
-    //tr->procmap = get_procgroup_map(tr);
+    tr->CV_lens = (int*) malloc(MAX_N_PROCS * sizeof(int));
     tr->state_stack = dfs_stack_create(tr->nslots);
     tr->trans_stack = list_create(MAX_DETERMINISM);
 
