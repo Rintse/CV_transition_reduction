@@ -16,7 +16,6 @@
 #include <util/util.h>
 #define MAX_CV_SIZE 64
 #define MAX_N_PROCS 64
-#define MAX_DETERMINISM 10
 
 
 typedef enum {
@@ -26,8 +25,8 @@ typedef enum {
 
 
 typedef struct CV_elem_s {
-    int* state;
     int transition;
+    int* state;
 } CV_elem_t;
 
 typedef struct tr_ctx {
@@ -42,11 +41,10 @@ typedef struct tr_ctx {
     dfs_stack_t*    queue[2];
 
 	// Saves the cartesian vectors
-	CV_elem_t**     CVs; // Saves states and transitions
-    int*            CV_lens;
+	CV_elem_t***    CVs; // Saves states and transitions
+    int**           CV_lens;
     // Temp storage for callback
-	dfs_stack_t*    state_stack;
-    list_t*         trans_stack;
+	dfs_stack_t*    stack;
 
     // Map groups to procs
     int*            procmap;
@@ -56,22 +54,6 @@ typedef struct tr_ctx {
     void*           ctx_org;
     size_t          emitted;
 } tr_context_t;
-
-
-
-// int*
-// get_procgroup_map(tr_context_t* tr) {
-//     int* m = (int*) malloc(tr->nactions * sizeof(int));
-//
-//     for(int i = 0; i < tr->num_procs; i++) {
-// 		for(int j = 0; j < list_count(tr->procs[i].groups); j++) {
-//             m[list_get(tr->procs->groups, j)] = i;
-// 		}
-// 	}
-//
-//     return m;
-// }
-
 
 int commute_last(int CV1, int CV2, tr_context_t* tr, bool* extendable) {
     bool commute = true;
@@ -106,8 +88,20 @@ bool commute_notlast(int CV1, int CV2, tr_context_t* tr) {
 void
 stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
 	tr_context_t *tr = (tr_context_t*) context;
-	dfs_stack_push(tr->state_stack, dst);
-    list_add(tr->trans_stack, ti->group);
+	int* temp = dfs_stack_push(tr->stack, 0);
+    memcpy(temp, &ti->group, sizeof(int));
+    memcpy(temp+sizeof(int), dst, tr->nslots*sizeof(int));
+}
+
+// It seems from the comments of the framework that this is necessary
+CV_elem_t pop_stack(dfs_stack_t* s, int nslots) {
+    int* temp = dfs_stack_pop(s);
+    CV_elem_t e;
+    memcpy(&e.transition, temp, sizeof(int));
+    e.state = (int*) malloc(nslots*sizeof(int));
+    memcpy(e.state, temp+sizeof(int), nslots*sizeof(int));
+
+    return e;
 }
 
 void nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
@@ -116,7 +110,7 @@ void nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx
         GBgetTransitionsLong(self, g, src, stack_push, ctx);
     }
 
-    Assert(dfs_stack_size(tr->state_stack) <= 1, "Radical! Non-determinism found.");
+    Assert(dfs_stack_size(tr->stack) <= 1, "Radical! Non-determinism found.");
 }
 
 int
@@ -131,13 +125,11 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     // Add first next state for all processes
     for(int i = 0; i < tr->num_procs; i++) {
         extendable[i] = true;
-        tr->CV_lens[i] = 1;
+        for(int j = 0; j < tr->num_procs; j++){
+            tr->CV_lens[i][j] = 0;
+        }
         nextStateProc(self, tr, src, i, ctx);
-        // stacks should be empty after this statement
-        tr->CVs[i][tr->CV_lens[i]++] = (CV_elem_t) {
-            .state = dfs_stack_pop(tr->state_stack),
-            .transition = list_pop(tr->trans_stack)
-        };
+        tr->CVs[i][i][tr->CV_lens[i][i]++] = pop_stack(tr->stack, tr->nslots);
     }
     // Check whether lasts commute
     for(int i = 0; i < tr->num_procs; i++) {
@@ -151,12 +143,12 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     int cur = 0;
     while(extendable_count > 0) {
         while(!extendable[cur]) { cur++; }
-        nextStateProc(self, tr, tr->CVs[cur][tr->CV_lens[cur]-1].state, cur, ctx);
-        tr->CVs[cur][tr->CV_lens[cur]++] = (CV_elem_t) {
-            .state = dfs_stack_pop(tr->state_stack),
-            .transition = list_pop(tr->trans_stack)
-        };
-
+        nextStateProc(
+            self, tr,
+            tr->CVs[cur][cur][tr->CV_lens[cur][cur]-1].state,
+            cur, ctx
+        );
+        tr->CVs[cur][cur][tr->CV_lens[cur][cur]++] = pop_stack(tr->stack, tr->nslots);
     }
 
 
@@ -190,14 +182,19 @@ pins2pins_tr (model_t model)
 
 
     // Allocate space for cartesian vectors
-	tr->CVs = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
+	tr->CVs = (CV_elem_t***) malloc(MAX_N_PROCS * sizeof(CV_elem_t**));
     for(int i = 0; i < MAX_N_PROCS; i++) {
-        tr->CVs[i] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
+        tr->CVs[i] = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
+        for(int j = 0; j < MAX_N_PROCS; j++) {
+            tr->CVs[i][j] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
+        }
+    }
+    tr->CV_lens = (int**) malloc(MAX_N_PROCS * sizeof(int*));
+    for(int i = 0; i < MAX_N_PROCS; i++) {
+        tr->CV_lens[i] = (int*) malloc(MAX_N_PROCS * sizeof(int));
     }
 
-    tr->CV_lens = (int*) malloc(MAX_N_PROCS * sizeof(int));
-    tr->state_stack = dfs_stack_create(tr->nslots);
-    tr->trans_stack = list_create(MAX_DETERMINISM);
+    tr->stack = dfs_stack_create(tr->nslots+1);
 
 	// create fresh PINS model
     model_t pormodel = GBcreateBase();
