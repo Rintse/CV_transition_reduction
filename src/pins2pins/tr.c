@@ -92,20 +92,17 @@ bool commute_notlast(int CV1, int CV2, tr_context_t* tr) {
 void
 stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
 	tr_context_t *tr = (tr_context_t*) context;
-	int* temp = dfs_stack_push(tr->stack, 0);
+	int* temp = dfs_stack_push(tr->stack, NULL);
     memcpy(temp, &ti->group, sizeof(int));
-    memcpy(temp+sizeof(int), dst, tr->nslots*sizeof(int));
+    memcpy(temp+1, dst, tr->nslots*sizeof(int));
 }
 
 // It seems from the comments of the framework that this is necessary
-CV_elem_t pop_stack(dfs_stack_t* s, int nslots) {
-    int* temp = dfs_stack_pop(s);
-    CV_elem_t e;
-    memcpy(&e.transition, temp, sizeof(int));
-    e.state = (int*) malloc(nslots*sizeof(int));
-    memcpy(e.state, temp+sizeof(int), nslots*sizeof(int));
-
-    return e;
+void pop_stack_to_CV(tr_context_t* tr, int i, int j) {
+    int* temp = dfs_stack_pop(tr->stack);
+    tr->CVs[i][j][tr->CV_lens[i][j]].transition = *temp;
+    memcpy(tr->CVs[i][j][tr->CV_lens[i][j]].state, temp+1, tr->nslots*sizeof(int));
+    tr->CV_lens[i][j]++;
 }
 
 // Concatenate CV2 after CV1
@@ -114,7 +111,7 @@ void concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
 
     for(int i = 0; i < tr->CV_lens[CV2][CV2]; i++) {
         GBgetTransitionsLong(self, tr->CVs[CV2][CV2][i].transition, temp, stack_push, ctx);
-        tr->CVs[CV1][CV2][tr->CV_lens[CV1][CV2]++] = pop_stack(tr->stack, tr->nslots);
+        pop_stack_to_CV(tr, CV1, CV2);
         temp = tr->CVs[CV1][CV2][tr->CV_lens[CV1][CV2]-1].state;
     }
 }
@@ -144,7 +141,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
             tr->CV_lens[i][j] = 0;
         }
         nextStateProc(self, tr, src, i, ctx);
-        tr->CVs[i][i][tr->CV_lens[i][i]++] = pop_stack(tr->stack, tr->nslots);
+        pop_stack_to_CV(tr, i, i);
     }
 
     for(int i = 0; i < tr->num_procs; i++) {
@@ -166,7 +163,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
             tr->CVs[cur][cur][tr->CV_lens[cur][cur]-1].state,
             cur, ctx
         );
-        tr->CVs[cur][cur][tr->CV_lens[cur][cur]++] = pop_stack(tr->stack, tr->nslots);
+        pop_stack_to_CV(tr, cur, cur);
     }
 
 
@@ -205,6 +202,9 @@ pins2pins_tr (model_t model)
         tr->CVs[i] = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
         for(int j = 0; j < MAX_N_PROCS; j++) {
             tr->CVs[i][j] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
+            for(int k = 0; k < MAX_CV_SIZE; k++) {
+                tr->CVs[i][j][k].state = (int*) malloc(tr->nslots*sizeof(int));
+            }
         }
     }
     tr->CV_lens = (int**) malloc(MAX_N_PROCS * sizeof(int*));
