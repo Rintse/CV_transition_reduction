@@ -55,16 +55,21 @@ typedef struct tr_ctx {
     size_t          emitted;
 } tr_context_t;
 
+int* last_state(int i, int j, tr_context_t* tr) {
+    return tr->CVs[i][j][tr->CV_lens[i][j]-1].state;
+}
+
 int commute_last(int CV1, int CV2, tr_context_t* tr, bool* extendable) {
-    bool commute = true;
+    bool commute = false;
     int nc_count = 0;
 
     if(!(extendable[CV1] || extendable[CV2])) return 0;
 
-    //TODO: check commute
-
-    //TEST: REMOVE LATER:
-    commute = false;
+    if(memcmp(
+        last_state(CV1, CV2, tr), last_state(CV2, CV1, tr), tr->nslots*sizeof(int)
+    ) == 0) {
+        commute = true;
+    }
 
     if(!commute) {
         if(extendable[CV1] == true) {
@@ -84,7 +89,6 @@ bool commute_notlast(int CV1, int CV2, tr_context_t* tr) {
     return false;
 }
 
-
 void
 stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
 	tr_context_t *tr = (tr_context_t*) context;
@@ -102,6 +106,17 @@ CV_elem_t pop_stack(dfs_stack_t* s, int nslots) {
     memcpy(e.state, temp+sizeof(int), nslots*sizeof(int));
 
     return e;
+}
+
+// Concatenate CV2 after CV1
+void concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
+    int* temp = tr->CVs[CV1][CV1][tr->CV_lens[CV1][CV1]-1].state;
+
+    for(int i = 0; i < tr->CV_lens[CV2][CV2]; i++) {
+        GBgetTransitionsLong(self, tr->CVs[CV2][CV2][i].transition, temp, stack_push, ctx);
+        tr->CVs[CV1][CV2][tr->CV_lens[CV1][CV2]++] = pop_stack(tr->stack, tr->nslots);
+        temp = tr->CVs[CV1][CV2][tr->CV_lens[CV1][CV2]-1].state;
+    }
 }
 
 void nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
@@ -131,10 +146,13 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
         nextStateProc(self, tr, src, i, ctx);
         tr->CVs[i][i][tr->CV_lens[i][i]++] = pop_stack(tr->stack, tr->nslots);
     }
-    // Check whether lasts commute
+
     for(int i = 0; i < tr->num_procs; i++) {
         for(int j = 0; j < tr->num_procs; j++) {
             if(i != j) {
+                // Initialize all combinations of CVs
+                concatenate(self, tr, ctx, i, j);
+                // Check whether lasts commute
                 extendable_count -= commute_last(i, j, tr, extendable);
             }
         }
