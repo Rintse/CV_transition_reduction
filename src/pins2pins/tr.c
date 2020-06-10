@@ -64,33 +64,70 @@ last_state(int i, int j, tr_context_t* tr) {
     return tr->CVs[i][j][tr->CV_lens[i][j]-1].state;
 }
 
-void
-commute_last(int CV1, int CV2, tr_context_t* tr) {
-    bool commute = false;
-
-    if(!(tr->extendable[CV1] || tr->extendable[CV2])) return;
-
-    if(memcmp(
-        last_state(CV1, CV2, tr), last_state(CV2, CV1, tr), tr->nslots*sizeof(int)
-    ) == 0) {
-        commute = true;
+// STACK STUFF
+// ============================================================================
+bool
+pop_stack_to_CV(tr_context_t* tr, int i, int j) {
+    if(dfs_stack_size(tr->stack) == 0) {
+        return false;
     }
 
-    //TODO: remove if works wihtout reduction
-    commute = false;
+    int* temp = dfs_stack_pop(tr->stack);
+    tr->CVs[i][j][tr->CV_lens[i][j]].transition = *temp;
+    memcpy(tr->CVs[i][j][tr->CV_lens[i][j]].state, temp+1, tr->nslots*sizeof(int));
+    tr->CV_lens[i][j]++;
+    return true;
+}
 
-    if(!commute) {
-        if(tr->extendable[CV1] == true) {
-            tr->extendable[CV1] = false;
-            tr->extendable_count--;
-        }
-        if(tr->extendable[CV2] == true) {
-            tr->extendable[CV2] = false;
-            tr->extendable_count--;
+void
+pop_state(tr_context_t* tr, int* tempvec) {
+    if(dfs_stack_size(tr->stack) == 0) {
+        return;
+    }
+
+    int* temp = dfs_stack_pop(tr->stack);
+    memcpy(tempvec, temp+1, tr->nslots*sizeof(int));
+}
+
+int
+pop_transition(tr_context_t* tr) {
+    if(dfs_stack_size(tr->stack) == 0) {
+        return -1;
+    }
+
+    return *dfs_stack_pop(tr->stack);
+}
+
+void
+stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
+	tr_context_t *tr = (tr_context_t*) context;
+	int* temp = dfs_stack_push(tr->stack, NULL);
+    memcpy(temp, &ti->group, sizeof(int));
+    memcpy(temp+1, dst, tr->nslots*sizeof(int));
+}
+
+// ============================================================================
+
+void
+commute_last(int CV1, tr_context_t* tr) {
+    for(int CV2 = 0; CV2 < tr->num_procs; CV2++) {
+        if(CV2 == CV1) continue;
+        if(!(tr->extendable[CV1] || tr->extendable[CV2])) continue;
+
+        if(memcmp(
+            last_state(CV1, CV2, tr), last_state(CV2, CV1, tr), tr->nslots*sizeof(int)
+        ) != 0) {
+            if(tr->extendable[CV1] == true) {
+                tr->extendable[CV1] = false;
+                tr->extendable_count--;
+            }
+            if(tr->extendable[CV2] == true) {
+                tr->extendable[CV2] = false;
+                tr->extendable_count--;
+            }
         }
     }
 }
-
 
 /*     a
 temp ----- temp2
@@ -123,12 +160,10 @@ commute_nonlast(
             GBgetTransitionsLong(self, t, temp2, stack_push, ctx);
             pop_state(tr, tr->res1);
 
-            GBgetTransitionsLong(self, a, temp3, stack_push, ctx);
+            GBgetTransitionsLong(self, a, tr->temp3, stack_push, ctx);
             pop_state(tr, tr->res2);
 
             if(memcmp(tr->res1, tr->res2, tr->nslots*sizeof(int)) != 0) {
-                extendable[CV1] = false;
-                extendable--;
                 return false;
             }
 
@@ -136,38 +171,6 @@ commute_nonlast(
         }
     }
 
-    extendCV(tr, CV1, t);
-    return true;
-}
-
-void
-stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
-	tr_context_t *tr = (tr_context_t*) context;
-	int* temp = dfs_stack_push(tr->stack, NULL);
-    memcpy(temp, &ti->group, sizeof(int));
-    memcpy(temp+1, dst, tr->nslots*sizeof(int));
-}
-
-void
-pop_state(tr_context_t* tr, int* tempvec) {
-    if(dfs_stack_size(tr->stack) == 0) {
-        return NULL;
-    }
-
-    int* temp = dfs_stack_pop(tr->stack);
-    memcpy(tempvec, temp+1, tr->nslots*sizeof(int));
-}
-
-bool
-pop_stack_to_CV(tr_context_t* tr, int i, int j) {
-    if(dfs_stack_size(tr->stack) == 0) {
-        return false;
-    }
-
-    int* temp = dfs_stack_pop(tr->stack);
-    tr->CVs[i][j][tr->CV_lens[i][j]].transition = *temp;
-    memcpy(tr->CVs[i][j][tr->CV_lens[i][j]].state, temp+1, tr->nslots*sizeof(int));
-    tr->CV_lens[i][j]++;
     return true;
 }
 
@@ -191,6 +194,11 @@ nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
     }
 
     Assert(dfs_stack_size(tr->stack) <= 1, "Radical! Non-determinism found.");
+}
+
+void
+extendCV(tr_context_t* tr, int CV, int t) {
+    return;
 }
 
 void
@@ -218,10 +226,12 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
             if(i != j) {
                 // Initialize all combinations of CVs
                 concatenate(self, tr, ctx, i, j);
-                // Check whether lasts commute
-                commute_last(i, j, tr);
             }
         }
+    }
+
+    for(int i = 0; i < tr->num_procs; i++) {
+        commute_last(i, tr);
     }
 }
 
@@ -238,10 +248,20 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
         while(!tr->extendable[cur]) { cur++; }
         nextStateProc(self, tr, last_state(cur, cur, tr), cur, ctx);
 
-        if(pop_stack_to_CV(tr, cur, cur) == false) {
+        int next_t = pop_transition(tr);
+        if(next_t == -1) {
             tr->extendable[cur] = false;
             tr->extendable_count--;
             continue;
+        }
+
+        if(!commute_nonlast(cur, next_t, tr, self, ctx)) {
+            tr->extendable[cur] = false;
+            tr->extendable--;
+        }
+        else {
+            extendCV(tr, cur, next_t);
+            commute_last(cur, tr);
         }
 
 
