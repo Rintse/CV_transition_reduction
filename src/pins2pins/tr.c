@@ -45,6 +45,10 @@ typedef struct tr_ctx {
     int**           CV_lens;
     // Temp storage for callback
 	dfs_stack_t*    stack;
+    bool*           extendable;
+    int             extendable_count;
+    // Temp storage for checking non-last commutativity (see commute_nonlast)
+    int*            temp3, *res1, *res2;
 
     // Map groups to procs
     int*            procmap;
@@ -55,15 +59,16 @@ typedef struct tr_ctx {
     size_t          emitted;
 } tr_context_t;
 
-int* last_state(int i, int j, tr_context_t* tr) {
+int*
+last_state(int i, int j, tr_context_t* tr) {
     return tr->CVs[i][j][tr->CV_lens[i][j]-1].state;
 }
 
-int commute_last(int CV1, int CV2, tr_context_t* tr, bool* extendable) {
+void
+commute_last(int CV1, int CV2, tr_context_t* tr) {
     bool commute = false;
-    int nc_count = 0;
 
-    if(!(extendable[CV1] || extendable[CV2])) return 0;
+    if(!(tr->extendable[CV1] || tr->extendable[CV2])) return;
 
     if(memcmp(
         last_state(CV1, CV2, tr), last_state(CV2, CV1, tr), tr->nslots*sizeof(int)
@@ -71,22 +76,68 @@ int commute_last(int CV1, int CV2, tr_context_t* tr, bool* extendable) {
         commute = true;
     }
 
+    //TODO: remove if works wihtout reduction
+    commute = false;
+
     if(!commute) {
-        if(extendable[CV1] == true) {
-            extendable[CV1] = false;
-            nc_count++;
+        if(tr->extendable[CV1] == true) {
+            tr->extendable[CV1] = false;
+            tr->extendable_count--;
         }
-        if(extendable[CV2] == true) {
-            extendable[CV2] = false;
-            nc_count++;
+        if(tr->extendable[CV2] == true) {
+            tr->extendable[CV2] = false;
+            tr->extendable_count--;
+        }
+    }
+}
+
+
+/*     a
+temp ----- temp2
+ |          |
+ | t        | t
+ |          |
+temp3 ---- (res1, res2)
+       a
+*/
+bool
+commute_nonlast(
+    int CV1,
+    int t,
+    tr_context_t* tr,
+    model_t self,
+    void* ctx
+) {
+    for(int CV2 = 0; CV2 < tr->num_procs; CV2++) {
+        if(CV2 == CV1) continue;
+        int* temp = last_state(CV1, CV1, tr);
+        int* temp2;
+
+        for(int i = 0; i < tr->CV_lens[CV1][CV2]-2; i++) {
+            temp2 = tr->CVs[CV1][CV2][i].state;
+            int a = tr->CVs[CV1][CV2][i].transition;
+
+            GBgetTransitionsLong(self, t, temp, stack_push, ctx);
+            pop_state(tr, tr->temp3);
+
+            GBgetTransitionsLong(self, t, temp2, stack_push, ctx);
+            pop_state(tr, tr->res1);
+
+            GBgetTransitionsLong(self, a, temp3, stack_push, ctx);
+            pop_state(tr, tr->res2);
+
+            if(memcmp(tr->res1, tr->res2, tr->nslots*sizeof(int)) != 0) {
+                extendable[CV1] = false;
+                extendable--;
+                return false;
+            }
+
+            temp = temp2;
         }
     }
 
-    return nc_count;
-}
-
-bool commute_notlast(int CV1, int CV2, tr_context_t* tr) {
-    return false;
+    extendCV(tr, CV1, t);
+    return true;
 }
 
 void
@@ -97,16 +148,32 @@ stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
     memcpy(temp+1, dst, tr->nslots*sizeof(int));
 }
 
-// It seems from the comments of the framework that this is necessary
-void pop_stack_to_CV(tr_context_t* tr, int i, int j) {
+void
+pop_state(tr_context_t* tr, int* tempvec) {
+    if(dfs_stack_size(tr->stack) == 0) {
+        return NULL;
+    }
+
+    int* temp = dfs_stack_pop(tr->stack);
+    memcpy(tempvec, temp+1, tr->nslots*sizeof(int));
+}
+
+bool
+pop_stack_to_CV(tr_context_t* tr, int i, int j) {
+    if(dfs_stack_size(tr->stack) == 0) {
+        return false;
+    }
+
     int* temp = dfs_stack_pop(tr->stack);
     tr->CVs[i][j][tr->CV_lens[i][j]].transition = *temp;
     memcpy(tr->CVs[i][j][tr->CV_lens[i][j]].state, temp+1, tr->nslots*sizeof(int));
     tr->CV_lens[i][j]++;
+    return true;
 }
 
 // Concatenate CV2 after CV1
-void concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
+void
+concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
     int* temp = tr->CVs[CV1][CV1][tr->CV_lens[CV1][CV1]-1].state;
 
     for(int i = 0; i < tr->CV_lens[CV2][CV2]; i++) {
@@ -116,7 +183,8 @@ void concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
     }
 }
 
-void nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
+void
+nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
     for(int j = 0; j < list_count(tr->procs[proc].groups); j++) {
         int g = list_get(tr->procs[proc].groups, j);
         GBgetTransitionsLong(self, g, src, stack_push, ctx);
@@ -125,23 +193,24 @@ void nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx
     Assert(dfs_stack_size(tr->stack) <= 1, "Radical! Non-determinism found.");
 }
 
-int
-tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
-{
-    tr_context_t *tr = (tr_context_t*) GBgetContext(self);
-	// CV ALGO
-	// ===========================================================================
-    bool* extendable = (bool*) malloc(tr->num_procs * sizeof(bool));
-    int extendable_count = tr->num_procs;
+void
+init(tr_context_t *tr, model_t self, int *src, void *ctx) {
+    tr->extendable_count = tr->num_procs;
 
     // Add first next state for all processes
     for(int i = 0; i < tr->num_procs; i++) {
-        extendable[i] = true;
         for(int j = 0; j < tr->num_procs; j++){
             tr->CV_lens[i][j] = 0;
         }
+
         nextStateProc(self, tr, src, i, ctx);
-        pop_stack_to_CV(tr, i, i);
+        if(pop_stack_to_CV(tr, i, i)) {
+            tr->extendable[i] = true;
+        }
+        else {
+            tr->extendable[i] = false;
+            tr->extendable_count--;
+        }
     }
 
     for(int i = 0; i < tr->num_procs; i++) {
@@ -150,20 +219,32 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
                 // Initialize all combinations of CVs
                 concatenate(self, tr, ctx, i, j);
                 // Check whether lasts commute
-                extendable_count -= commute_last(i, j, tr, extendable);
+                commute_last(i, j, tr);
             }
         }
     }
+}
+
+int
+tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
+{
+    tr_context_t *tr = (tr_context_t*) GBgetContext(self);
+	// CV ALGO
+	// ===========================================================================
+    init(tr, self, src, ctx);
 
     int cur = 0;
-    while(extendable_count > 0) {
-        while(!extendable[cur]) { cur++; }
-        nextStateProc(
-            self, tr,
-            tr->CVs[cur][cur][tr->CV_lens[cur][cur]-1].state,
-            cur, ctx
-        );
-        pop_stack_to_CV(tr, cur, cur);
+    while(tr->extendable_count > 0) {
+        while(!tr->extendable[cur]) { cur++; }
+        nextStateProc(self, tr, last_state(cur, cur, tr), cur, ctx);
+
+        if(pop_stack_to_CV(tr, cur, cur) == false) {
+            tr->extendable[cur] = false;
+            tr->extendable_count--;
+            continue;
+        }
+
+
     }
 
 
@@ -213,6 +294,12 @@ pins2pins_tr (model_t model)
     }
 
     tr->stack = dfs_stack_create(tr->nslots+1);
+    tr->extendable = (bool*) malloc(tr->num_procs * sizeof(bool));
+
+    // Temp vectors
+    tr->temp3 = (int*) malloc(tr->nslots * sizeof(int));
+    tr->res1 = (int*) malloc(tr->nslots * sizeof(int));
+    tr->res2 = (int*) malloc(tr->nslots * sizeof(int));
 
 	// create fresh PINS model
     model_t pormodel = GBcreateBase();
