@@ -15,7 +15,11 @@
 #include <util/runtime.h>
 #include <util/util.h>
 #define MAX_CV_SIZE 64
-#define MAX_N_PROCS 64
+#define MAX_N_PROCS 16
+
+// TODO: geen stack maar constant size buffer voor callbacks
+// TODO: CVs[X][X] -> last(CVs[X][X]):
+//       Je hoeft alleen de laatste op te slaan
 
 
 typedef enum {
@@ -42,6 +46,7 @@ typedef struct tr_ctx {
 
 	// Saves the cartesian vectors
 	CV_elem_t***    CVs; // Saves states and transitions
+    CV_elem_t**     tmpCVs; // For rollback when extending a CV
     int**           CV_lens;
     // Temp storage for callback
 	dfs_stack_t*    stack;
@@ -148,14 +153,13 @@ commute_nonlast(
     for(int CV2 = 0; CV2 < tr->num_procs; CV2++) {
         if(CV2 == CV1) continue;
         int* temp = last_state(CV1, CV1, tr);
+        GBgetTransitionsLong(self, t, temp, stack_push, ctx);
+        pop_state(tr, tr->temp3);
         int* temp2;
 
         for(int i = 0; i < tr->CV_lens[CV1][CV2]-2; i++) {
             temp2 = tr->CVs[CV1][CV2][i].state;
             int a = tr->CVs[CV1][CV2][i].transition;
-
-            GBgetTransitionsLong(self, t, temp, stack_push, ctx);
-            pop_state(tr, tr->temp3);
 
             GBgetTransitionsLong(self, t, temp2, stack_push, ctx);
             pop_state(tr, tr->res1);
@@ -168,6 +172,10 @@ commute_nonlast(
             }
 
             temp = temp2;
+            temp3 = res1;
+
+            // Save (a,res1) to temp vector
+            tr->tempCVs[CV2][i].state
         }
     }
 
@@ -299,8 +307,15 @@ pins2pins_tr (model_t model)
 
     // Allocate space for cartesian vectors
 	tr->CVs = (CV_elem_t***) malloc(MAX_N_PROCS * sizeof(CV_elem_t**));
+    tr->tempCVs = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
     for(int i = 0; i < MAX_N_PROCS; i++) {
         tr->CVs[i] = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
+        tr->tempCVs[i] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
+
+        for(int j = 0; j < MAX_CV_SIZE; j++) {
+            tr->tempCVs[i][j].state = (int*) malloc(tr->nslots*sizeof(int));
+        }
+
         for(int j = 0; j < MAX_N_PROCS; j++) {
             tr->CVs[i][j] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
             for(int k = 0; k < MAX_CV_SIZE; k++) {
