@@ -38,16 +38,16 @@ typedef struct tr_ctx {
     size_t          nslots;   // number of variables in state vector
 	size_t		    nactions;
 	size_t          nguards;
-    size_t          num_procs;
+    size_t          nprocs;
 
     process_t*      procs;
     int*            g2p;
     dfs_stack_t*    queue[2];
 
 	// Saves the cartesian vectors
-	CV_elem_t***    CVs; // Saves states and transitions
-    CV_elem_t**     tmpCVs; // For rollback when extending a CV
-    int**           CV_lens;
+    dfs_stack_t***  CVs;
+    dfs_stack_t**   tempCVs;
+
     // Temp storage for callback
 	dfs_stack_t*    stack;
     bool*           extendable;
@@ -64,9 +64,13 @@ typedef struct tr_ctx {
     size_t          emitted;
 } tr_context_t;
 
+// Helpers for readability
+int* get_state(int* elem) { return elem+1; }
+int get_trans(int* elem) { return *elem; }
+
 int*
-last_state(int i, int j, tr_context_t* tr) {
-    return tr->CVs[i][j][tr->CV_lens[i][j]-1].state;
+last_state(dfs_stack_t* s) {
+    return get_state(dfs_stack_top(s));
 }
 
 // STACK STUFF
@@ -78,9 +82,9 @@ pop_stack_to_CV(tr_context_t* tr, int i, int j) {
     }
 
     int* temp = dfs_stack_pop(tr->stack);
-    tr->CVs[i][j][tr->CV_lens[i][j]].transition = *temp;
-    memcpy(tr->CVs[i][j][tr->CV_lens[i][j]].state, temp+1, tr->nslots*sizeof(int));
-    tr->CV_lens[i][j]++;
+    int* cv = dfs_stack_push(tr->CVs[i][j], NULL);
+    *cv = *temp;
+    memcpy(cv+1, temp+1, tr->nslots*sizeof(int));
     return true;
 }
 
@@ -105,7 +109,9 @@ pop_transition(tr_context_t* tr) {
 
 void
 stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
-	tr_context_t *tr = (tr_context_t*) context;
+    tr_context_t *tr = (tr_context_t*) context;
+    Assert(dfs_stack_size(tr->stack) > 0, "Radical! Non-determinism found.");
+
 	int* temp = dfs_stack_push(tr->stack, NULL);
     memcpy(temp, &ti->group, sizeof(int));
     memcpy(temp+1, dst, tr->nslots*sizeof(int));
@@ -115,12 +121,14 @@ stack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
 
 void
 commute_last(int CV1, tr_context_t* tr) {
-    for(int CV2 = 0; CV2 < tr->num_procs; CV2++) {
+    for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV1) continue;
         if(!(tr->extendable[CV1] || tr->extendable[CV2])) continue;
 
         if(memcmp(
-            last_state(CV1, CV2, tr), last_state(CV2, CV1, tr), tr->nslots*sizeof(int)
+            last_state(tr->CVs[CV1][CV2]),
+            last_state(tr->CVs[CV2][CV1]),
+            tr->nslots*sizeof(int)
         ) != 0) {
             if(tr->extendable[CV1] == true) {
                 tr->extendable[CV1] = false;
@@ -150,16 +158,16 @@ commute_nonlast(
     model_t self,
     void* ctx
 ) {
-    for(int CV2 = 0; CV2 < tr->num_procs; CV2++) {
+    for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV1) continue;
-        int* temp = last_state(CV1, CV1, tr);
+        int* temp = last_state(tr->CVs[CV1][CV1]);
         GBgetTransitionsLong(self, t, temp, stack_push, ctx);
         pop_state(tr, tr->temp3);
         int* temp2;
 
-        for(int i = 0; i < tr->CV_lens[CV1][CV2]-2; i++) {
-            temp2 = tr->CVs[CV1][CV2][i].state;
-            int a = tr->CVs[CV1][CV2][i].transition;
+        for(int i = 0; i < dfs_stack_size(tr->CVs[CV1][CV2])-2; i++) {
+            temp2 = get_state(dfs_stack_index(tr->CVs[CV1][CV2], i));
+            int a = get_trans(dfs_stack_index(tr->CVs[CV1][CV2], i));
 
             GBgetTransitionsLong(self, t, temp2, stack_push, ctx);
             pop_state(tr, tr->res1);
@@ -172,10 +180,10 @@ commute_nonlast(
             }
 
             temp = temp2;
-            temp3 = res1;
+            tr->temp3 = tr->res1;
 
             // Save (a,res1) to temp vector
-            tr->tempCVs[CV2][i].state
+            //tr->tempCVs[CV2][i].state
         }
     }
 
@@ -185,12 +193,13 @@ commute_nonlast(
 // Concatenate CV2 after CV1
 void
 concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
-    int* temp = tr->CVs[CV1][CV1][tr->CV_lens[CV1][CV1]-1].state;
+    int* s = last_state(tr->CVs[CV1][CV1]);
 
-    for(int i = 0; i < tr->CV_lens[CV2][CV2]; i++) {
-        GBgetTransitionsLong(self, tr->CVs[CV2][CV2][i].transition, temp, stack_push, ctx);
+    for(int i = 0; i < dfs_stack_size(tr->CVs[CV2][CV2])-1; i++) {
+        int t = get_trans(dfs_stack_index(tr->CVs[CV2][CV2],i));
+        GBgetTransitionsLong(self, t, s, stack_push, ctx);
         pop_stack_to_CV(tr, CV1, CV2);
-        temp = tr->CVs[CV1][CV2][tr->CV_lens[CV1][CV2]-1].state;
+        s = last_state(tr->CVs[CV1][CV2]);
     }
 }
 
@@ -200,8 +209,6 @@ nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
         int g = list_get(tr->procs[proc].groups, j);
         GBgetTransitionsLong(self, g, src, stack_push, ctx);
     }
-
-    Assert(dfs_stack_size(tr->stack) <= 1, "Radical! Non-determinism found.");
 }
 
 void
@@ -211,14 +218,10 @@ extendCV(tr_context_t* tr, int CV, int t) {
 
 void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
-    tr->extendable_count = tr->num_procs;
+    tr->extendable_count = tr->nprocs;
 
     // Add first next state for all processes
-    for(int i = 0; i < tr->num_procs; i++) {
-        for(int j = 0; j < tr->num_procs; j++){
-            tr->CV_lens[i][j] = 0;
-        }
-
+    for(int i = 0; i < tr->nprocs; i++) {
         nextStateProc(self, tr, src, i, ctx);
         if(pop_stack_to_CV(tr, i, i)) {
             tr->extendable[i] = true;
@@ -229,8 +232,8 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
         }
     }
 
-    for(int i = 0; i < tr->num_procs; i++) {
-        for(int j = 0; j < tr->num_procs; j++) {
+    for(int i = 0; i < tr->nprocs; i++) {
+        for(int j = 0; j < tr->nprocs; j++) {
             if(i != j) {
                 // Initialize all combinations of CVs
                 concatenate(self, tr, ctx, i, j);
@@ -238,7 +241,7 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
         }
     }
 
-    for(int i = 0; i < tr->num_procs; i++) {
+    for(int i = 0; i < tr->nprocs; i++) {
         commute_last(i, tr);
     }
 }
@@ -254,7 +257,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     int cur = 0;
     while(tr->extendable_count > 0) {
         while(!tr->extendable[cur]) { cur++; }
-        nextStateProc(self, tr, last_state(cur, cur, tr), cur, ctx);
+        nextStateProc(self, tr, last_state(tr->CVs[cur][cur]), cur, ctx);
 
         int next_t = pop_transition(tr);
         if(next_t == -1) {
@@ -301,35 +304,20 @@ pins2pins_tr (model_t model)
     tr->model = model;
     tr->nactions = pins_get_group_count(model);
     tr->nslots = pins_get_state_variable_count (model);
-    tr->procs = identify_procs(model, &tr->num_procs, tr->g2p);
+    tr->procs = identify_procs(model, &tr->nprocs, tr->g2p);
     Print ("Number of actions: %zu", tr->nactions);
 
 
     // Allocate space for cartesian vectors
-	tr->CVs = (CV_elem_t***) malloc(MAX_N_PROCS * sizeof(CV_elem_t**));
-    tr->tempCVs = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
-    for(int i = 0; i < MAX_N_PROCS; i++) {
-        tr->CVs[i] = (CV_elem_t**) malloc(MAX_N_PROCS * sizeof(CV_elem_t*));
-        tr->tempCVs[i] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
-
-        for(int j = 0; j < MAX_CV_SIZE; j++) {
-            tr->tempCVs[i][j].state = (int*) malloc(tr->nslots*sizeof(int));
+    for(int i = 0; i < tr->nprocs; i++) {
+        tr->tempCVs[i] = dfs_stack_create(tr->nslots+1);
+        for(int j = 0; j < tr->nprocs; j++) {
+            tr->CVs[i][j] = dfs_stack_create(tr->nslots+1);
         }
-
-        for(int j = 0; j < MAX_N_PROCS; j++) {
-            tr->CVs[i][j] = (CV_elem_t*) malloc(MAX_CV_SIZE * sizeof(CV_elem_t));
-            for(int k = 0; k < MAX_CV_SIZE; k++) {
-                tr->CVs[i][j][k].state = (int*) malloc(tr->nslots*sizeof(int));
-            }
-        }
-    }
-    tr->CV_lens = (int**) malloc(MAX_N_PROCS * sizeof(int*));
-    for(int i = 0; i < MAX_N_PROCS; i++) {
-        tr->CV_lens[i] = (int*) malloc(MAX_N_PROCS * sizeof(int));
     }
 
     tr->stack = dfs_stack_create(tr->nslots+1);
-    tr->extendable = (bool*) malloc(tr->num_procs * sizeof(bool));
+    tr->extendable = (bool*) malloc(tr->nprocs * sizeof(bool));
 
     // Temp vectors
     tr->temp3 = (int*) malloc(tr->nslots * sizeof(int));
