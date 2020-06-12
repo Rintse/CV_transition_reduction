@@ -51,6 +51,7 @@ typedef struct tr_ctx {
     // Temp storage for callback
 	dfs_stack_t*    tempstack;
     bool*           extendable;
+    bool*           infinite;
     int             extendable_count;
     // Temp storage for checking non-last commutativity (see commute_nonlast)
     int*            temp3, *res1, *res2;
@@ -216,6 +217,7 @@ nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
 
 void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
+    for(int i = 0; i < tr->nprocs; i++) { tr->infinite[i] = false; }
     tr->extendable_count = tr->nprocs;
 
     // Add first next state for all processes
@@ -246,7 +248,7 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
 
 
 void
-extendCV(tr_context_t* tr, int CV, int t, model_t self, void* ctx) {
+extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
     for(int i = 0; i < tr->nprocs; i++) {
         // replace (a,s) with (a, t(s))
         tr->CVs[CV][i] = tr->tempCVs[i];
@@ -254,12 +256,30 @@ extendCV(tr_context_t* tr, int CV, int t, model_t self, void* ctx) {
         GBgetTransitionsLong(self, t, last_state(tr->CVs[i][CV]), tempstack_push, ctx);
         pop_temp_to_CV(tr, i, CV);
     }
+    // extend CV itself
+    stack_push(tr, tr->CVs[CV][CV], t, s);
 }
 
 void
 clean_temps(tr_context_t* tr) {
     for(int i = 0; i < tr->nprocs; i++) {
         dfs_stack_clear(tr->tempCVs[i]);
+    }
+}
+
+void
+check_internal_loop(tr_context_t* tr, int CV) {
+    if(!tr->extendable[CV]) return;
+
+    int* last = last_state(tr->CVs[CV][CV]);
+    for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV])-2; i++) {
+        int* cur = get_state(dfs_stack_index(tr->CVs[CV][CV], i));
+        if(memcmp(cur, last, tr->nslots*sizeof(int)) != 0) {
+            tr->infinite[CV] = true;
+            tr->extendable[CV] = false;
+            tr->extendable_count--;
+            return;
+        }
     }
 }
 
@@ -276,7 +296,10 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
         while(!tr->extendable[cur]) { cur++; }
         nextStateProc(self, tr, last_state(tr->CVs[cur][cur]), cur, ctx);
 
-        int next_t = pop_temp_transition(tr);
+        int* temp = dfs_stack_pop(tr->tempstack);
+        int next_t = get_trans(temp);
+        int* next_s = get_state(temp);
+
         if(next_t == -1) {
             tr->extendable[cur] = false;
             tr->extendable_count--;
@@ -289,11 +312,10 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
             tr->extendable--;
         }
         else {
-            extendCV(tr, cur, next_t, self, ctx);
+            extendCV(tr, cur, next_t, next_s, self, ctx);
             commute_last(cur, tr);
+            check_internal_loop(tr, cur);
         }
-
-
     }
 
 
@@ -303,6 +325,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     //TODO
     tr->cb_org = cb;
     tr->ctx_org = ctx;
+    tr->cb_org(por->ctx_org, ti, dst, cpy);
     tr->emitted = 0;
     return tr->emitted;
 }
@@ -335,6 +358,7 @@ pins2pins_tr (model_t model)
 
     tr->tempstack = dfs_stack_create(tr->nslots+1);
     tr->extendable = (bool*) malloc(tr->nprocs * sizeof(bool));
+    tr->infinite = (bool*) malloc(tr->nprocs * sizeof(bool));
 
     // Temp vectors
     tr->temp3 = (int*) malloc(tr->nslots * sizeof(int));
