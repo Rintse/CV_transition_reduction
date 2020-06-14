@@ -48,6 +48,9 @@ typedef struct tr_ctx {
     dfs_stack_t***  CVs;
     dfs_stack_t**   tempCVs;
 
+    // For scheduling extensions
+    int cur;
+
     // Temp storage for callback
 	dfs_stack_t*    tempstack;
     bool*           extendable;
@@ -74,14 +77,35 @@ last_state(dfs_stack_t* s) {
     return get_state(dfs_stack_top(s));
 }
 
-void stack_push(tr_context_t* tr, dfs_stack_t* stack, int t, int* s) {
+
+// SCHEDULING STUFF
+// ============================================================================
+void
+RR_next(tr_context_t* tr) { // Round robin extensions of CVs
+    do {
+        tr->cur = (tr->cur + 1) % tr->nprocs;
+    } while(!tr->extendable[tr->cur]);
+}
+
+void
+DF_next(tr_context_t* tr) { // depth first extension of CVs
+    while(!tr->extendable[tr->cur]) {
+        tr->cur++;
+    }
+}
+
+
+
+// STACK STUFF
+// ============================================================================
+void
+stack_push(tr_context_t* tr, dfs_stack_t* stack, int t, int* s) {
     int* temp = dfs_stack_push(stack, NULL);
     memcpy(temp, &t, sizeof(int));
     memcpy(temp+1, s, tr->nslots*sizeof(int));
 }
 
-// STACK STUFF
-// ============================================================================
+
 bool
 pop_temp_to_CV(tr_context_t* tr, int i, int j) {
     if(dfs_stack_size(tr->tempstack) == 0) {
@@ -217,6 +241,7 @@ nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
 
 void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
+    tr->cur = 0;
     for(int i = 0; i < tr->nprocs; i++) { tr->infinite[i] = false; }
     tr->extendable_count = tr->nprocs;
 
@@ -291,30 +316,31 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 	// ===========================================================================
     init(tr, self, src, ctx);
 
-    int cur = 0;
     while(tr->extendable_count > 0) {
-        while(!tr->extendable[cur]) { cur++; }
-        nextStateProc(self, tr, last_state(tr->CVs[cur][cur]), cur, ctx);
+        RR_next(tr);
+        // DF_next(tr);
+
+        nextStateProc(self, tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur, ctx);
 
         int* temp = dfs_stack_pop(tr->tempstack);
         int next_t = get_trans(temp);
         int* next_s = get_state(temp);
 
         if(next_t == -1) {
-            tr->extendable[cur] = false;
+            tr->extendable[tr->cur] = false;
             tr->extendable_count--;
             continue;
         }
 
-        if(!commute_nonlast(cur, next_t, tr, self, ctx)) {
+        if(!commute_nonlast(tr->cur, next_t, tr, self, ctx)) {
             clean_temps(tr);
-            tr->extendable[cur] = false;
+            tr->extendable[tr->cur] = false;
             tr->extendable--;
         }
         else {
-            extendCV(tr, cur, next_t, next_s, self, ctx);
-            commute_last(cur, tr);
-            check_internal_loop(tr, cur);
+            extendCV(tr, tr->cur, next_t, next_s, self, ctx);
+            commute_last(tr->cur, tr);
+            check_internal_loop(tr, tr->cur);
         }
     }
 
@@ -325,7 +351,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     //TODO
     tr->cb_org = cb;
     tr->ctx_org = ctx;
-    tr->cb_org(por->ctx_org, ti, dst, cpy);
+    //tr->cb_org(tr->ctx_org, ti, dst, cpy);
     tr->emitted = 0;
     return tr->emitted;
 }
