@@ -14,6 +14,7 @@
 #include <util/list.h>
 #include <util/runtime.h>
 #include <util/util.h>
+#include "add_group.h"
 #define MAX_CV_SIZE 64
 #define MAX_N_PROCS 16
 
