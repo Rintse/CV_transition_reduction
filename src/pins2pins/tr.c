@@ -50,6 +50,8 @@ typedef struct tr_ctx {
 
     // For scheduling extensions
     int cur;
+    // For keeping track of groups
+    int group_start;
 
     // Temp storage for callback
 	dfs_stack_t*    tempstack;
@@ -75,6 +77,11 @@ int get_trans(int* elem) { return *elem; }
 int*
 last_state(dfs_stack_t* s) {
     return get_state(dfs_stack_top(s));
+}
+
+int
+last_trans(dfs_stack_t* s) {
+    return get_trans(dfs_stack_top(s));
 }
 
 
@@ -308,6 +315,18 @@ check_internal_loop(tr_context_t* tr, int CV) {
     }
 }
 
+void
+return_states(tr_context_t* tr) {
+    for(int i = 0; i < tr->nprocs; i++) {
+        int* last_s = last_state(tr->CVs[i][i]);
+        if(last_s) {
+            transition_info_t ti = GB_TI(NULL, tr->group_start+i);
+            tr->cb_org(tr->ctx_org, &ti, last_s, NULL);
+            tr->emitted++;
+        }
+    }
+}
+
 int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
@@ -351,8 +370,8 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     //TODO
     tr->cb_org = cb;
     tr->ctx_org = ctx;
-    //tr->cb_org(tr->ctx_org, ti, dst, cpy);
     tr->emitted = 0;
+    return_states(tr);
     return tr->emitted;
 }
 
@@ -372,7 +391,6 @@ pins2pins_tr (model_t model)
     tr->nslots = pins_get_state_variable_count (model);
     tr->procs = identify_procs(model, &tr->nprocs, tr->g2p);
     Print ("Number of actions: %zu", tr->nactions);
-
 
     // Allocate space for cartesian vectors
     for(int i = 0; i < tr->nprocs; i++) {
@@ -404,6 +422,12 @@ pins2pins_tr (model_t model)
     int s0[tr->nslots];
     GBgetInitialState(model, s0);
     GBsetInitialState(pormodel, s0);
+
+    // Create groups
+    tr->group_start = pins_get_group_count(model);
+    for(int i = 0; i < tr->nprocs; i++) {
+        leap_add_leap_group(pormodel, model);
+    }
 
     return pormodel;
 }
