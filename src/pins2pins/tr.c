@@ -71,7 +71,9 @@ typedef struct tr_ctx {
     size_t          emitted;
 } tr_context_t;
 
-// Helpers for readability
+
+// CV ACCESS
+// ============================================================================
 int* get_state(int* elem) { return elem+1; }
 int get_trans(int* elem) { return *elem; }
 
@@ -84,7 +86,6 @@ int
 last_trans(dfs_stack_t* s) {
     return get_trans(dfs_stack_top(s));
 }
-
 
 // SCHEDULING STUFF
 // ============================================================================
@@ -101,8 +102,6 @@ DF_next(tr_context_t* tr) { // depth first extension of CVs
         tr->cur++;
     }
 }
-
-
 
 // STACK STUFF
 // ============================================================================
@@ -219,15 +218,13 @@ commute_nonlast(
 
             // Save (a,res1) to temp vector
             stack_push(tr, tr->tempCVs[CV2], a, tr->res1);
-            //tr->tempCVs[CV2][i].state
         }
     }
 
     return true;
 }
 
-// Concatenate CV2 after CV1
-void
+void // Concatenate CV2 after CV1
 concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
     int* s = last_state(tr->CVs[CV1][CV1]);
 
@@ -319,6 +316,8 @@ check_internal_loop(tr_context_t* tr, int CV) {
 void
 return_states(tr_context_t* tr) {
     for(int i = 0; i < tr->nprocs; i++) {
+        if(tr->infinite[i]) continue;
+
         int* last_s = last_state(tr->CVs[i][i]);
         if(last_s) {
             transition_info_t ti = GB_TI(NULL, tr->group_start+i);
@@ -363,12 +362,9 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
             check_internal_loop(tr, tr->cur);
         }
     }
-
-
 	// ===========================================================================
 
     // Forward the next selected successor states to the algorithm:
-    //TODO
     tr->cb_org = cb;
     tr->ctx_org = ctx;
     tr->emitted = 0;
@@ -382,19 +378,19 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 model_t
 pins2pins_tr (model_t model)
 {
-	if (!pins_has_guards(model)) {
-        Abort ("Frontend doesn't have guards. Ignoring --por.");
-    }
-
     tr_context_t *tr = malloc(sizeof *tr);
     tr->model = model;
     tr->nactions = pins_get_group_count(model);
     tr->nslots = pins_get_state_variable_count (model);
+    tr->g2p = (int*) malloc(pins_get_group_count(model) * sizeof(int));
     tr->procs = identify_procs(model, &tr->nprocs, tr->g2p);
     Print ("Number of actions: %zu", tr->nactions);
 
     // Allocate space for cartesian vectors
+    tr->CVs = (dfs_stack_t***) malloc(tr->nprocs * sizeof(dfs_stack_t**));
+    tr->tempCVs = (dfs_stack_t**) malloc(tr->nprocs * sizeof(dfs_stack_t*));
     for(int i = 0; i < tr->nprocs; i++) {
+        tr->CVs[i] = (dfs_stack_t**) malloc(tr->nprocs * sizeof(dfs_stack_t*));
         tr->tempCVs[i] = dfs_stack_create(tr->nslots+1);
         for(int j = 0; j < tr->nprocs; j++) {
             tr->CVs[i][j] = dfs_stack_create(tr->nslots+1);
@@ -412,14 +408,13 @@ pins2pins_tr (model_t model)
 
 	// create fresh PINS model
     model_t pormodel = GBcreateBase();
-
     // set POR as new context
     GBsetContext(pormodel, tr);
     // set por next state function
     GBsetNextStateAll(pormodel, tr_next_all);
-
     // copy all the other data from the original model
     GBinitModelDefaults(&pormodel, model);
+    
     int s0[tr->nslots];
     GBgetInitialState(model, s0);
     GBsetInitialState(pormodel, s0);
