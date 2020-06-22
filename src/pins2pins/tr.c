@@ -194,7 +194,8 @@ pop_temp_transition(tr_context_t* tr) {
 void
 tempstack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
     tr_context_t *tr = (tr_context_t*) context;
-    Assert(dfs_stack_size(tr->tempstack) > 0, "Radical! Non-determinism found.");
+    fprintf(stderr, "stack size: %ld\n", dfs_stack_size(tr->tempstack));
+    Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
 
     stack_push(tr, tr->tempstack, ti->group, dst);
 }
@@ -243,7 +244,7 @@ commute_nonlast(
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV1) continue;
         int* temp = last_state(tr->CVs[CV1][CV1]);
-        GBgetTransitionsLong(self, t, temp, tempstack_push, ctx);
+        GBgetTransitionsLong(tr->model, t, temp, tempstack_push, ctx);
         pop_temp_state(tr, tr->temp3);
         int* temp2;
 
@@ -251,10 +252,10 @@ commute_nonlast(
             temp2 = get_state(dfs_stack_index(tr->CVs[CV1][CV2], i));
             int a = get_trans(dfs_stack_index(tr->CVs[CV1][CV2], i));
 
-            GBgetTransitionsLong(self, t, temp2, tempstack_push, ctx);
+            GBgetTransitionsLong(tr->model, t, temp2, tempstack_push, ctx);
             pop_temp_state(tr, tr->res1);
 
-            GBgetTransitionsLong(self, a, tr->temp3, tempstack_push, ctx);
+            GBgetTransitionsLong(tr->model, a, tr->temp3, tempstack_push, ctx);
             pop_temp_state(tr, tr->res2);
 
             if(memcmp(tr->res1, tr->res2, tr->nslots*sizeof(int)) != 0) {
@@ -272,13 +273,13 @@ commute_nonlast(
     return true;
 }
 
-void // Concatenate CV2 after CV1
+void // Concatenate CV1 and CV2
 concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
     int* s = last_state(tr->CVs[CV1][CV1]);
 
     for(int i = 0; i < dfs_stack_size(tr->CVs[CV2][CV2])-1; i++) {
-        int t = get_trans(dfs_stack_index(tr->CVs[CV2][CV2],i));
-        GBgetTransitionsLong(self, t, s, tempstack_push, ctx);
+        int t = get_trans(dfs_stack_index(tr->CVs[CV2][CV2], i));
+        GBgetTransitionsLong(tr->model, t, s, tempstack_push, ctx);
         pop_temp_to_CV(tr, CV1, CV2);
         s = last_state(tr->CVs[CV1][CV2]);
     }
@@ -286,18 +287,14 @@ concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
 
 void
 nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
-    fprintf(stderr, "Parameters  nextStateProc\n");
-    printf("Address of src: %p\n", src);
-    printf("Address of ctx: %p\n", ctx);
     for(int j = 0; j < list_count(tr->procs[proc].groups); j++) {
         int g = list_get(tr->procs[proc].groups, j);
-        GBgetTransitionsLong(self, g, src, tempstack_push, ctx);
+        GBgetTransitionsLong(tr->model, g, src, tempstack_push, tr);
     }
 }
 
 void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
-    fprintf(stderr, "Entry of init\n");
     tr->cur = 0;
     for(int i = 0; i < tr->nprocs; i++) { tr->infinite[i] = false; }
     tr->extendable_count = tr->nprocs;
@@ -313,8 +310,6 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
             tr->extendable_count--;
         } // TODO: could transitions become available??
     }
-
-    fprintf(stderr, "first state added\n");
 
     for(int i = 0; i < tr->nprocs; i++) {
         for(int j = 0; j < tr->nprocs; j++) {
@@ -337,7 +332,7 @@ extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
         // replace (a,s) with (a, t(s))
         tr->CVs[CV][i] = tr->tempCVs[i];
         // extend with t
-        GBgetTransitionsLong(self, t, last_state(tr->CVs[i][CV]), tempstack_push, ctx);
+        GBgetTransitionsLong(tr->model, t, last_state(tr->CVs[i][CV]), tempstack_push, ctx);
         pop_temp_to_CV(tr, i, CV);
     }
     // extend CV itself
@@ -384,11 +379,6 @@ return_states(tr_context_t* tr) {
 int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
-    fprintf(stderr, "Entry of next_all\n");
-    fprintf(stderr, "Parameters tr next all\n");
-    printf("Address of src: %p\n", src);
-    printf("Address of ctx: %p\n", ctx);
-
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
 	// CV ALGO
 	// ===========================================================================
@@ -411,20 +401,14 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
         }
 
         if(!commute_nonlast(tr->cur, next_t, tr, self, ctx)) {
-            fprintf(stderr, "commute nonlast done\n");
             clean_temps(tr);
-            fprintf(stderr, "clean tepms done\n");
             tr->extendable[tr->cur] = false;
             tr->extendable--;
         }
         else {
-            fprintf(stderr, "commute nonlast done\n");
             extendCV(tr, tr->cur, next_t, next_s, self, ctx);
-            fprintf(stderr, "extend done\n");
             commute_last(tr->cur, tr);
-            fprintf(stderr, "commute last done\n");
             check_internal_loop(tr, tr->cur);
-            fprintf(stderr, "loop done\n");
         }
     }
 	// ===========================================================================
