@@ -14,25 +14,12 @@
 #include <util/list.h>
 #include <util/runtime.h>
 #include <util/util.h>
-#include "add_group.h"
 #define MAX_CV_SIZE 64
 #define MAX_N_PROCS 16
 
 // TODO: geen stack maar constant size buffer voor callbacks
 // TODO: CVs[X][X] -> last(CVs[X][X]):
 //       Je hoeft alleen de laatste op te slaan
-
-
-typedef enum {
-    Disabled = 0,
-    Enabled  = 1
-} status_t;
-
-
-typedef struct CV_elem_s {
-    int transition;
-    int* state;
-} CV_elem_t;
 
 typedef struct tr_ctx {
     model_t         model;
@@ -70,6 +57,67 @@ typedef struct tr_ctx {
     void*           ctx_org;
     size_t          emitted;
 } tr_context_t;
+
+
+// Adding groups
+// ============================================================================
+static matrix_t *
+enlarge_matrix (matrix_t *dm, int add_rows, int add_cols)
+{
+    matrix_t *new = RTmalloc (sizeof(matrix_t));
+    dm_create (new, dm_nrows(dm) + add_rows, dm_ncols(dm) + add_cols);
+    for (int i = 0; i < dm_nrows (dm); i++) {
+        for (int j = 0; j < dm_ncols(dm); j++) {
+            if (dm_is_set(dm, i, j)) {
+                dm_set (new, i, j);
+            }
+        }
+    }
+    return new;
+}
+
+void
+tr_fill_process_groups (tr_context_t *tr, matrix_t *dm)
+{
+    int cols = dm_ncols(dm);
+    int rows = dm_nrows(dm);
+    // for each process p
+    for(process_t *p = &tr->procs[0]; p != &tr->procs[tr->nprocs]; p++) {
+        int new_process_group = rows - 1 - p->id;
+        // for all groups g of p
+        for(int i = 0; i < list_count(p->groups); i++) {
+            int g = list_get(p->groups, i);
+            // for all slots i in the state vector
+            for (int j = 0; j < cols; j++) {
+                // if the dm has a dependency between p and i,
+                // then the process group also depends on i
+                if (dm_is_set(dm, g, j)) {
+                    dm_set(dm, new_process_group, j);
+                }
+            }
+        }
+    }
+}
+
+void
+tr_add_leap_groups(tr_context_t *tr, model_t por_model, model_t pre_por)
+{
+    matrix_t *dm = enlarge_matrix (GBgetDMInfo(pre_por), tr->nprocs, 0);
+    tr_fill_process_groups (tr, dm);
+    GBsetDMInfo (por_model, dm);
+
+    dm = enlarge_matrix (GBgetDMInfoMayWrite(pre_por), tr->nprocs, 0);
+    tr_fill_process_groups (tr, dm);
+    GBsetDMInfoMayWrite (por_model, dm);
+
+    dm = enlarge_matrix (GBgetDMInfoMustWrite(pre_por), tr->nprocs, 0);
+    tr_fill_process_groups (tr, dm);
+    GBsetDMInfoMustWrite (por_model, dm);
+
+    dm = enlarge_matrix (GBgetDMInfoRead(pre_por), tr->nprocs, 0);
+    tr_fill_process_groups (tr, dm);
+    GBsetDMInfoRead (por_model, dm);
+}
 
 
 // CV ACCESS
@@ -238,6 +286,9 @@ concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
 
 void
 nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
+    fprintf(stderr, "Parameters  nextStateProc\n");
+    printf("Address of src: %p\n", src);
+    printf("Address of ctx: %p\n", ctx);
     for(int j = 0; j < list_count(tr->procs[proc].groups); j++) {
         int g = list_get(tr->procs[proc].groups, j);
         GBgetTransitionsLong(self, g, src, tempstack_push, ctx);
@@ -246,6 +297,7 @@ nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
 
 void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
+    fprintf(stderr, "Entry of init\n");
     tr->cur = 0;
     for(int i = 0; i < tr->nprocs; i++) { tr->infinite[i] = false; }
     tr->extendable_count = tr->nprocs;
@@ -256,11 +308,13 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
         if(pop_temp_to_CV(tr, i, i)) {
             tr->extendable[i] = true;
         }
-        else {
+        else { // There are no successor states for this process
             tr->extendable[i] = false;
             tr->extendable_count--;
-        }
+        } // TODO: could transitions become available??
     }
+
+    fprintf(stderr, "first state added\n");
 
     for(int i = 0; i < tr->nprocs; i++) {
         for(int j = 0; j < tr->nprocs; j++) {
@@ -330,6 +384,11 @@ return_states(tr_context_t* tr) {
 int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
+    fprintf(stderr, "Entry of next_all\n");
+    fprintf(stderr, "Parameters tr next all\n");
+    printf("Address of src: %p\n", src);
+    printf("Address of ctx: %p\n", ctx);
+
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
 	// CV ALGO
 	// ===========================================================================
@@ -352,14 +411,20 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
         }
 
         if(!commute_nonlast(tr->cur, next_t, tr, self, ctx)) {
+            fprintf(stderr, "commute nonlast done\n");
             clean_temps(tr);
+            fprintf(stderr, "clean tepms done\n");
             tr->extendable[tr->cur] = false;
             tr->extendable--;
         }
         else {
+            fprintf(stderr, "commute nonlast done\n");
             extendCV(tr, tr->cur, next_t, next_s, self, ctx);
+            fprintf(stderr, "extend done\n");
             commute_last(tr->cur, tr);
+            fprintf(stderr, "commute last done\n");
             check_internal_loop(tr, tr->cur);
+            fprintf(stderr, "loop done\n");
         }
     }
 	// ===========================================================================
@@ -408,22 +473,19 @@ pins2pins_tr (model_t model)
 
 	// create fresh PINS model
     model_t pormodel = GBcreateBase();
+    // Create groups
+    tr->group_start = pins_get_group_count(model);
+    tr_add_leap_groups(tr, pormodel, model);
     // set POR as new context
     GBsetContext(pormodel, tr);
     // set por next state function
     GBsetNextStateAll(pormodel, tr_next_all);
     // copy all the other data from the original model
     GBinitModelDefaults(&pormodel, model);
-    
+
     int s0[tr->nslots];
     GBgetInitialState(model, s0);
     GBsetInitialState(pormodel, s0);
-
-    // Create groups
-    tr->group_start = pins_get_group_count(model);
-    for(int i = 0; i < tr->nprocs; i++) {
-        leap_add_leap_group(pormodel, model);
-    }
 
     return pormodel;
 }
