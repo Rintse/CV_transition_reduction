@@ -194,7 +194,6 @@ pop_temp_transition(tr_context_t* tr) {
 void
 tempstack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
     tr_context_t *tr = (tr_context_t*) context;
-    fprintf(stderr, "stack size: %ld\n", dfs_stack_size(tr->tempstack));
     Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
 
     stack_push(tr, tr->tempstack, ti->group, dst);
@@ -206,7 +205,15 @@ void
 commute_last(int CV1, tr_context_t* tr) {
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV1) continue;
-        if(!(tr->extendable[CV1] || tr->extendable[CV2])) continue;
+        // Both already not extendable: this function will do nothing, skip for
+        // efficiency
+        if(!tr->extendable[CV1] && !tr->extendable[CV2]) continue;
+
+        // If CV1 or CV2 is length 0, they always commute
+        if(dfs_stack_size(tr->CVs[CV1][CV2]) == 0
+        || dfs_stack_size(tr->CVs[CV2][CV1]) == 0) {
+            continue;
+        }
 
         if(memcmp(
             last_state(tr->CVs[CV1][CV2]),
@@ -248,7 +255,7 @@ commute_nonlast(
         pop_temp_state(tr, tr->temp3);
         int* temp2;
 
-        for(int i = 0; i < dfs_stack_size(tr->CVs[CV1][CV2])-2; i++) {
+        for(int i = 0; i < dfs_stack_size(tr->CVs[CV1][CV2])-1; i++) {
             temp2 = get_state(dfs_stack_index(tr->CVs[CV1][CV2], i));
             int a = get_trans(dfs_stack_index(tr->CVs[CV1][CV2], i));
 
@@ -275,18 +282,28 @@ commute_nonlast(
 
 void // Concatenate CV1 and CV2
 concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
-    int* s = last_state(tr->CVs[CV1][CV1]);
-
-    for(int i = 0; i < dfs_stack_size(tr->CVs[CV2][CV2])-1; i++) {
-        int t = get_trans(dfs_stack_index(tr->CVs[CV2][CV2], i));
+    if(dfs_stack_size(tr->CVs[CV1][CV1]) == 0) {
+        stack_push(
+            tr,
+            tr->CVs[CV1][CV2],
+            last_trans(tr->CVs[CV2][CV2]),
+            last_state(tr->CVs[CV2][CV2])
+        );
+        return;
+    }
+    else if(dfs_stack_size(tr->CVs[CV2][CV2]) == 0) {
+        return;
+    }
+    else {
+        int* s = last_state(tr->CVs[CV1][CV1]);
+        int t = get_trans(dfs_stack_top(tr->CVs[CV2][CV2]));
         GBgetTransitionsLong(tr->model, t, s, tempstack_push, ctx);
-        pop_temp_to_CV(tr, CV1, CV2);
-        s = last_state(tr->CVs[CV1][CV2]);
+        pop_temp_to_CV(tr, CV1, CV2); //TODO: wat als geen transitie
     }
 }
 
 void
-nextStateProc(model_t self, tr_context_t* tr, int* src, int proc, void* ctx) {
+nextStateProc(tr_context_t* tr, int* src, int proc, void* ctx) {
     for(int j = 0; j < list_count(tr->procs[proc].groups); j++) {
         int g = list_get(tr->procs[proc].groups, j);
         GBgetTransitionsLong(tr->model, g, src, tempstack_push, tr);
@@ -301,13 +318,12 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
 
     // Add first next state for all processes
     for(int i = 0; i < tr->nprocs; i++) {
-        nextStateProc(self, tr, src, i, ctx);
+        nextStateProc(tr, src, i, ctx);
         if(pop_temp_to_CV(tr, i, i)) {
             tr->extendable[i] = true;
         }
         else { // There are no successor states for this process
-            tr->extendable[i] = false;
-            tr->extendable_count--;
+
         } // TODO: could transitions become available??
     }
 
@@ -331,7 +347,6 @@ extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
     for(int i = 0; i < tr->nprocs; i++) {
         // replace (a,s) with (a, t(s))
         tr->CVs[CV][i] = tr->tempCVs[i];
-        // extend with t
         GBgetTransitionsLong(tr->model, t, last_state(tr->CVs[i][CV]), tempstack_push, ctx);
         pop_temp_to_CV(tr, i, CV);
     }
@@ -351,7 +366,7 @@ check_internal_loop(tr_context_t* tr, int CV) {
     if(!tr->extendable[CV]) return;
 
     int* last = last_state(tr->CVs[CV][CV]);
-    for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV])-2; i++) {
+    for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV])-1; i++) {
         int* cur = get_state(dfs_stack_index(tr->CVs[CV][CV], i));
         if(memcmp(cur, last, tr->nslots*sizeof(int)) != 0) {
             tr->infinite[CV] = true;
@@ -365,8 +380,10 @@ check_internal_loop(tr_context_t* tr, int CV) {
 void
 return_states(tr_context_t* tr) {
     for(int i = 0; i < tr->nprocs; i++) {
+        // Do not return states marked as infinite
         if(tr->infinite[i]) continue;
 
+        // Otherwise, return all final states from the CVs
         int* last_s = last_state(tr->CVs[i][i]);
         if(last_s) {
             transition_info_t ti = GB_TI(NULL, tr->group_start+i);
@@ -387,18 +404,17 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     while(tr->extendable_count > 0) {
         RR_next(tr);
         // DF_next(tr);
+        if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) == 0) continue;
 
-        nextStateProc(self, tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur, ctx);
+        nextStateProc(tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur, ctx);
 
         int* temp = dfs_stack_pop(tr->tempstack);
-        int next_t = get_trans(temp);
-        int* next_s = get_state(temp);
-
-        if(next_t == -1) {
-            tr->extendable[tr->cur] = false;
-            tr->extendable_count--;
+        if(temp == NULL) {
             continue;
         }
+
+        int next_t = get_trans(temp);
+        int* next_s = get_state(temp);
 
         if(!commute_nonlast(tr->cur, next_t, tr, self, ctx)) {
             clean_temps(tr);
