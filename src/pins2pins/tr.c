@@ -31,6 +31,7 @@ typedef struct tr_ctx {
     process_t*      procs;
     int*            g2p;
     dfs_stack_t*    queue[2];
+    int*            src;
 
 	// Saves the cartesian vectors
     dfs_stack_t***  CVs;
@@ -137,18 +138,48 @@ last_trans(dfs_stack_t* s) {
 
 // SCHEDULING STUFF
 // ============================================================================
-void
-RR_next(tr_context_t* tr) { // Round robin extensions of CVs
-    do {
+int*
+RR_next(tr_context_t* tr, void* ctx) { // Round robin extensions of CVs
+    bool valid = false;
+    int* temp;
+
+    while(!valid) {
         tr->cur = (tr->cur + 1) % tr->nprocs;
-    } while(!tr->extendable[tr->cur]);
+
+        // can't select non extendable process
+        if(tr->extendable[tr->cur]) {
+            int* start = dfs_stack_size(tr->CVs[tr->cur][tr->cur]) == 0 ?
+                            tr->src : last_state(tr->CVs[tr->cur][tr->cur]);
+            nextStateProc(tr, start, tr->cur, ctx);
+            temp = dfs_stack_pop(tr->tempstack);
+            if(temp != NULL) { // Can't select blocking process
+                valid = true;
+            }
+        }
+    }
+    return temp;
 }
 
 void
 DF_next(tr_context_t* tr) { // depth first extension of CVs
-    while(!tr->extendable[tr->cur]) {
-        tr->cur++;
+    bool valid = false;
+    int* temp;
+
+    while(!valid) {
+        // can't select non extendable process
+        if(tr->extendable[tr->cur]) {
+            int* start = dfs_stack_size(tr->CVs[tr->cur][tr->cur]) == 0 ?
+                            tr->src : last_state(tr->CVs[tr->cur][tr->cur]);
+            nextStateProc(tr, start, tr->cur, ctx);
+            temp = dfs_stack_pop(tr->tempstack);
+            if(temp != NULL) { // Can't select blocking process
+                valid = true;
+            }
+        }
+        
+        if(!valid) tr->cur = (tr->cur + 1) % tr->nprocs;
     }
+    return temp;
 }
 
 // STACK STUFF
@@ -313,18 +344,15 @@ nextStateProc(tr_context_t* tr, int* src, int proc, void* ctx) {
 void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
     tr->cur = 0;
+    tr->src = src;
     for(int i = 0; i < tr->nprocs; i++) { tr->infinite[i] = false; }
     tr->extendable_count = tr->nprocs;
 
     // Add first next state for all processes
     for(int i = 0; i < tr->nprocs; i++) {
         nextStateProc(tr, src, i, ctx);
-        if(pop_temp_to_CV(tr, i, i)) {
-            tr->extendable[i] = true;
-        }
-        else { // There are no successor states for this process
-
-        } // TODO: could transitions become available??
+        pop_temp_to_CV(tr, i, i);
+        tr->extendable[i] = true;
     }
 
     for(int i = 0; i < tr->nprocs; i++) {
