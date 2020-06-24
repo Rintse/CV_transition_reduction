@@ -156,6 +156,14 @@ pop_temp_to_CV(tr_context_t* tr, int i, int j) {
     return true;
 }
 
+int* pop_temp(tr_context_t* tr) {
+    if(dfs_stack_size(tr->tempstack) == 0) {
+        return NULL;
+    }
+
+    return dfs_stack_pop(tr->tempstack);
+}
+
 void
 pop_temp_state(tr_context_t* tr, int* tempvec) {
     if(dfs_stack_size(tr->tempstack) == 0) {
@@ -210,10 +218,19 @@ RR_next(tr_context_t* tr, void* ctx) { // Round robin extensions of CVs
                             tr->src : last_state(tr->CVs[tr->cur][tr->cur]);
             nextStateProc(tr, start, tr->cur, ctx);
             temp = dfs_stack_pop(tr->tempstack);
-            if(temp != NULL) { // Can't select blocking process
+            if(temp != NULL) { // Next state exists
                 valid = true;
             }
+            // Blocking: not extendable, and infinite
+            // Processes with an empty prefix cannot be dependent on other transitions,
+            // therefore they are not removed from extendable
+            else if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) > 0) {
+                tr->infinite[tr->cur] = true;
+                tr->extendable[tr->cur] = false;
+                tr->extendable_count--;
+            }
         }
+        // All processes are not extendable or blocked
         if(++tried == tr->nprocs) {
             return NULL;
         }
@@ -234,12 +251,21 @@ DF_next(tr_context_t* tr, void* ctx) { // depth first extension of CVs
                             tr->src : last_state(tr->CVs[tr->cur][tr->cur]);
             nextStateProc(tr, start, tr->cur, ctx);
             temp = dfs_stack_pop(tr->tempstack);
-            if(temp != NULL) { // Can't select blocking process
+            if(temp != NULL) { // Next state exists
                 valid = true;
+            }
+            // Blocking: not extendable, and infinite
+            // Processes with an empty prefix cannot be dependent on other transitions,
+            // therefore they are not removed from extendable
+            else if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) > 0) {
+                tr->infinite[tr->cur] = true;
+                tr->extendable[tr->cur] = false;
+                tr->extendable_count--;
             }
         }
 
         if(!valid) tr->cur = (tr->cur + 1) % tr->nprocs;
+        // All processes are not extendable or blocked
         if(++tried == tr->nprocs) {
             return NULL;
         }
@@ -298,6 +324,8 @@ commute_nonlast(
 ) {
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV1) continue;
+        if(dfs_stack_size(tr->CVs[CV2][CV2]) == 0) continue;
+
         int* temp = last_state(tr->CVs[CV1][CV1]);
         GBgetTransitionsLong(tr->model, t, temp, tempstack_push, ctx);
         pop_temp_state(tr, tr->temp3);
@@ -321,25 +349,26 @@ commute_nonlast(
             tr->temp3 = tr->res1;
 
             // Save (a,res1) to temp vector
-            stack_push(tr, tr->tempCVs[CV2], a, tr->res1);
+            // stack_push(tr, tr->tempCVs[CV2], a, tr->res1);
         }
     }
 
     return true;
 }
 
+
 void // Concatenate CV1 and CV2
 concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
-    if(dfs_stack_size(tr->CVs[CV1][CV1]) == 0) {
+    if(dfs_stack_size(tr->CVs[CV2][CV2]) == 0) {
+        return;
+    }
+    else if(dfs_stack_size(tr->CVs[CV1][CV1]) == 0) {
         stack_push(
             tr,
             tr->CVs[CV1][CV2],
             last_trans(tr->CVs[CV2][CV2]),
             last_state(tr->CVs[CV2][CV2])
         );
-        return;
-    }
-    else if(dfs_stack_size(tr->CVs[CV2][CV2]) == 0) {
         return;
     }
     else {
@@ -350,6 +379,35 @@ concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
     }
 }
 
+void
+extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
+    // extend CV itself
+    stack_push(tr, tr->CVs[CV][CV], t, s);
+
+    for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
+        if(CV2 == CV) continue;
+        // replace (a,s) with (a, t(s))
+        for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV2]); i++) {
+            int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
+            // Get t(s)
+            GBgetTransitionsLong(tr->model, t, get_state(item), tempstack_push, ctx);
+            pop_temp_state(tr, tr->res1);
+            // Replace s with t(s)
+            memcpy(item+1, tr->res1, tr->nslots*sizeof(int));
+        }
+
+        // extend with the new transition
+        if(dfs_stack_size(tr->CVs[CV2][CV2]) != 0){
+            int* start = dfs_stack_size(tr->CVs[CV2][CV]) == 0 ?
+                            last_state(tr->CVs[CV2][CV2]) : last_state(tr->CVs[CV2][CV]);
+            GBgetTransitionsLong(tr->model, t, start, tempstack_push, ctx);
+            pop_temp_to_CV(tr, CV2, CV);
+        }
+        else{
+            tr->CVs[CV2][CV] = tr->CVs[CV][CV]; // TODO moet wel  tr->CVs[CV][CV] al gefixt zijn.
+        }
+    }
+}
 
 void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
@@ -361,35 +419,25 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
     // Add first next state for all processes
     for(int i = 0; i < tr->nprocs; i++) {
         nextStateProc(tr, src, i, ctx);
-        pop_temp_to_CV(tr, i, i);
+        //pop_temp_to_CV(tr, i, i);
         tr->extendable[i] = true;
+        int* temp = pop_temp(tr);
+
+        extendCV(tr, i, *temp, temp+1, self, ctx);
     }
 
-    for(int i = 0; i < tr->nprocs; i++) {
+    /*for(int i = 0; i < tr->nprocs; i++) {
         for(int j = 0; j < tr->nprocs; j++) {
             if(i != j) {
                 // Initialize all combinations of CVs
                 concatenate(self, tr, ctx, i, j);
             }
         }
-    }
+    }*/
 
     for(int i = 0; i < tr->nprocs; i++) {
         commute_last(i, tr);
     }
-}
-
-
-void
-extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
-    for(int i = 0; i < tr->nprocs; i++) {
-        // replace (a,s) with (a, t(s))
-        tr->CVs[CV][i] = tr->tempCVs[i];
-        GBgetTransitionsLong(tr->model, t, last_state(tr->CVs[i][CV]), tempstack_push, ctx);
-        pop_temp_to_CV(tr, i, CV);
-    }
-    // extend CV itself
-    stack_push(tr, tr->CVs[CV][CV], t, s);
 }
 
 void
