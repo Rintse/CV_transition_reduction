@@ -34,7 +34,6 @@ typedef struct tr_ctx {
 
 	// Saves the cartesian vectors
     dfs_stack_t***  CVs;
-    dfs_stack_t**   tempCVs;
 
     // For scheduling extensions
     int cur;
@@ -233,16 +232,13 @@ RR_next(tr_context_t* tr) { // Round robin extensions of CVs
             temp = dfs_stack_pop(tr->tempstack);
             if(temp != NULL) { // Next state exists
                 valid = true;
-                fprintf(stderr, "process %i heeft een volgende state hoera!\n", tr->cur);
             }
             // Blocking: not extendable, and infinite
             // Processes with an empty prefix cannot be dependent on other transitions,
             // therefore they are not removed from extendable
             else if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) > 0) {
-                tr->infinite[tr->cur] = true;
                 tr->blocked[tr->cur] = true;
                 mark_not_extendable(tr, tr->cur);
-                fprintf(stderr, "process %i is geblockt geraakt :(\n", tr->cur);
             }
         }
         // All processes are not extendable or blocked
@@ -338,7 +334,8 @@ commute_nonlast(
         pop_temp_state(tr, tr->temp3);
         int* temp2;
 
-        for(int i = 0; i < dfs_stack_size(tr->CVs[CV1][CV2])-1; i++) {
+        fprintf(stderr, "stack size voor loop: %lu\n",  dfs_stack_size(tr->CVs[CV1][CV2]));
+        for(int i = 0; i < ((int)dfs_stack_size(tr->CVs[CV1][CV2]))-1; i++) {
             temp2 = get_state(dfs_stack_index(tr->CVs[CV1][CV2], i));
             int a = get_trans(dfs_stack_index(tr->CVs[CV1][CV2], i));
 
@@ -393,7 +390,17 @@ extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
 }
 
 void
+clean_CVs(tr_context_t *tr) {
+    for(int i = 0; i < tr->nprocs; i++) {
+        for(int j = 0; j < tr->nprocs; j++) {
+            dfs_stack_clear(tr->CVs[i][j]);
+        }
+    }
+}
+
+void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
+    clean_CVs(tr);
     tr->cur = 0;
     tr->src = src;
     tr->extendable_count = tr->nprocs;
@@ -453,7 +460,9 @@ check_blocked(int t, tr_context_t* tr) {
     // Check if this thread has now enabled others
     for(int t2 = 0; t2 < tr->nprocs; t2++) {
         if(t2 != t && tr->blocked[t2]) {
-            nextStateProc(tr, last_state(tr->CVs[t2][t2]), t2);
+            int* start = dfs_stack_size(tr->CVs[t2][t2]) == 0 ?
+                            tr->src : last_state(tr->CVs[t2][t2]);
+            nextStateProc(tr, start, t2);
             temp = dfs_stack_pop(tr->tempstack);
             if(temp != NULL) { // Next state exists
                 tr->blocked[t2] = false;
@@ -469,7 +478,7 @@ return_states(tr_context_t* tr) {
         // Do not return states marked as infinite
         if(tr->infinite[i]) continue;
 
-        // Otherwise, return all final states from the CVs
+        // Otherwise, return the final state
         int* last_s = last_state(tr->CVs[i][i]);
         if(last_s) {
             transition_info_t ti = GB_TI(NULL, tr->group_start+i);
@@ -515,6 +524,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     tr->ctx_org = ctx;
     tr->emitted = 0;
     return_states(tr);
+    fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
     return tr->emitted;
 }
 
@@ -534,10 +544,8 @@ pins2pins_tr (model_t model)
 
     // Allocate space for cartesian vectors
     tr->CVs = (dfs_stack_t***) malloc(tr->nprocs * sizeof(dfs_stack_t**));
-    tr->tempCVs = (dfs_stack_t**) malloc(tr->nprocs * sizeof(dfs_stack_t*));
     for(int i = 0; i < tr->nprocs; i++) {
         tr->CVs[i] = (dfs_stack_t**) malloc(tr->nprocs * sizeof(dfs_stack_t*));
-        tr->tempCVs[i] = dfs_stack_create(tr->nslots+1);
         for(int j = 0; j < tr->nprocs; j++) {
             tr->CVs[i][j] = dfs_stack_create(tr->nslots+1);
         }
