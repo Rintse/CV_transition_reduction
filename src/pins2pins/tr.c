@@ -189,8 +189,6 @@ tempstack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
     tr_context_t *tr = (tr_context_t*) context;
     Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
 
-    fprintf(stderr, "group = %i\n", ti->group);
-
     stack_push(tr, tr->tempstack, ti->group, dst);
 }
 
@@ -207,7 +205,10 @@ nextStateProc(tr_context_t* tr, int* src, int proc) {
     //fprintf(stderr, "process %i heeft %lu enabelde acties\n", proc, dfs_stack_size(tr->tempstack));
 }
 
-void mark_not_extendable(tr_context_t* tr, int p) {
+// REMOVE FROM extendable
+// ============================================================================
+void
+mark_not_extendable(tr_context_t* tr, int p) {
     if(tr->extendable[p]) {
         tr->extendable[p] = false;
         tr->extendable_count--;
@@ -217,14 +218,14 @@ void mark_not_extendable(tr_context_t* tr, int p) {
 // SCHEDULING STUFF
 // ============================================================================
 int*
-RR_next(tr_context_t* tr, void* ctx) { // Round robin extensions of CVs
+RR_next(tr_context_t* tr) { // Round robin extensions of CVs
     bool valid = false;
     int* temp;
     int tried = 0;
 
     while(!valid) {
         tr->cur = (tr->cur + 1) % tr->nprocs;
-        fprintf(stderr, "RR: cur is %i\n", tr->cur);
+        //fprintf(stderr, "RR: cur is %i\n", tr->cur);
 
         // can't select non extendable process
         if(tr->extendable[tr->cur]) {
@@ -243,9 +244,6 @@ RR_next(tr_context_t* tr, void* ctx) { // Round robin extensions of CVs
                 mark_not_extendable(tr, tr->cur);
                 fprintf(stderr, "process %i is geblockt geraakt :(\n", tr->cur);
             }
-            else { //for debug purposes
-                fprintf(stderr, "process %i is leeg en altijd al geweest\n", tr->cur);
-            }
         }
         // All processes are not extendable or blocked
         if(++tried == tr->nprocs) {
@@ -256,7 +254,7 @@ RR_next(tr_context_t* tr, void* ctx) { // Round robin extensions of CVs
 }
 
 int*
-DF_next(tr_context_t* tr, void* ctx) { // depth first extension of CVs
+DF_next(tr_context_t* tr) { // depth first extension of CVs
     bool valid = false;
     int* temp;
     int tried = 0;
@@ -336,7 +334,7 @@ commute_nonlast(
         if(dfs_stack_size(tr->CVs[CV2][CV2]) == 0) continue;
 
         int* temp = last_state(tr->CVs[CV1][CV1]);
-        GBgetTransitionsLong(tr->model, t, temp, tempstack_push, ctx);
+        GBgetTransitionsLong(tr->model, t, temp, tempstack_push, tr);
         pop_temp_state(tr, tr->temp3);
         int* temp2;
 
@@ -344,10 +342,10 @@ commute_nonlast(
             temp2 = get_state(dfs_stack_index(tr->CVs[CV1][CV2], i));
             int a = get_trans(dfs_stack_index(tr->CVs[CV1][CV2], i));
 
-            GBgetTransitionsLong(tr->model, t, temp2, tempstack_push, ctx);
+            GBgetTransitionsLong(tr->model, t, temp2, tempstack_push, tr);
             pop_temp_state(tr, tr->res1);
 
-            GBgetTransitionsLong(tr->model, a, tr->temp3, tempstack_push, ctx);
+            GBgetTransitionsLong(tr->model, a, tr->temp3, tempstack_push, tr);
             pop_temp_state(tr, tr->res2);
 
             if(memcmp(tr->res1, tr->res2, tr->nslots*sizeof(int)) != 0) {
@@ -375,7 +373,7 @@ extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
         for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV2]); i++) {
             int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
             // Get t(s)
-            GBgetTransitionsLong(tr->model, t, get_state(item), tempstack_push, ctx);
+            GBgetTransitionsLong(tr->model, t, get_state(item), tempstack_push, tr);
             pop_temp_state(tr, tr->res1);
             // Replace s with t(s)
             memcpy(item+1, tr->res1, tr->nslots*sizeof(int));
@@ -385,7 +383,7 @@ extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
         if(dfs_stack_size(tr->CVs[CV2][CV2]) != 0){
             int* start = dfs_stack_size(tr->CVs[CV2][CV]) == 0 ?
                             last_state(tr->CVs[CV2][CV2]) : last_state(tr->CVs[CV2][CV]);
-            GBgetTransitionsLong(tr->model, t, start, tempstack_push, ctx);
+            GBgetTransitionsLong(tr->model, t, start, tempstack_push, tr);
             pop_temp_to_CV(tr, CV2, CV);
         }
         else{
@@ -416,6 +414,10 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
             tr->infinite[i] = false;
             tr->blocked[i] = false;
         }
+    }
+
+    for(int i = 0; i < tr->nprocs; i++) {
+        fprintf(stderr, "CV %i is lengte %lu\n", i, dfs_stack_size(tr->CVs[i][i]));
     }
 
     for(int i = 0; i < tr->nprocs; i++) {
@@ -486,9 +488,9 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     init(tr, self, src, ctx);
 
     while(tr->extendable_count > 0) {
-        int* temp = RR_next(tr, ctx);
+        int* temp = RR_next(tr);
         fprintf(stderr, "cur is %i\n", tr->cur);
-        // temp = DF_next(tr, ctx);
+        // temp = DF_next(tr);
         if(temp == NULL) {
             break; // All processes either not extendable or blocking
         }
