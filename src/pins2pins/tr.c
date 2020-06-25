@@ -45,6 +45,7 @@ typedef struct tr_ctx {
 	dfs_stack_t*    tempstack;
     bool*           extendable;
     bool*           infinite;
+    bool*           blocked;
     int             extendable_count;
     // Temp storage for checking non-last commutativity (see commute_nonlast)
     int*            temp3, *res1, *res2;
@@ -188,16 +189,28 @@ tempstack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
     tr_context_t *tr = (tr_context_t*) context;
     Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
 
+    fprintf(stderr, "group = %i\n", ti->group);
+
     stack_push(tr, tr->tempstack, ti->group, dst);
 }
 
 // NEXT STATE
 // ============================================================================
 void
-nextStateProc(tr_context_t* tr, int* src, int proc, void* ctx) {
+nextStateProc(tr_context_t* tr, int* src, int proc) {
+    //fprintf(stderr, "process %i heeft zoveel ", proc);
     for(int j = 0; j < list_count(tr->procs[proc].groups); j++) {
         int g = list_get(tr->procs[proc].groups, j);
         GBgetTransitionsLong(tr->model, g, src, tempstack_push, tr);
+    }
+
+    //fprintf(stderr, "process %i heeft %lu enabelde acties\n", proc, dfs_stack_size(tr->tempstack));
+}
+
+void mark_not_extendable(tr_context_t* tr, int p) {
+    if(tr->extendable[p]) {
+        tr->extendable[p] = false;
+        tr->extendable_count--;
     }
 }
 
@@ -211,23 +224,27 @@ RR_next(tr_context_t* tr, void* ctx) { // Round robin extensions of CVs
 
     while(!valid) {
         tr->cur = (tr->cur + 1) % tr->nprocs;
+        fprintf(stderr, "RR: cur is %i\n", tr->cur);
 
         // can't select non extendable process
         if(tr->extendable[tr->cur]) {
-            int* start = dfs_stack_size(tr->CVs[tr->cur][tr->cur]) == 0 ?
-                            tr->src : last_state(tr->CVs[tr->cur][tr->cur]);
-            nextStateProc(tr, start, tr->cur, ctx);
+            nextStateProc(tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur);
             temp = dfs_stack_pop(tr->tempstack);
             if(temp != NULL) { // Next state exists
                 valid = true;
+                fprintf(stderr, "process %i heeft een volgende state hoera!\n", tr->cur);
             }
             // Blocking: not extendable, and infinite
             // Processes with an empty prefix cannot be dependent on other transitions,
             // therefore they are not removed from extendable
             else if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) > 0) {
                 tr->infinite[tr->cur] = true;
-                tr->extendable[tr->cur] = false;
-                tr->extendable_count--;
+                tr->blocked[tr->cur] = true;
+                mark_not_extendable(tr, tr->cur);
+                fprintf(stderr, "process %i is geblockt geraakt :(\n", tr->cur);
+            }
+            else { //for debug purposes
+                fprintf(stderr, "process %i is leeg en altijd al geweest\n", tr->cur);
             }
         }
         // All processes are not extendable or blocked
@@ -247,9 +264,7 @@ DF_next(tr_context_t* tr, void* ctx) { // depth first extension of CVs
     while(!valid) {
         // can't select non extendable process
         if(tr->extendable[tr->cur]) {
-            int* start = dfs_stack_size(tr->CVs[tr->cur][tr->cur]) == 0 ?
-                            tr->src : last_state(tr->CVs[tr->cur][tr->cur]);
-            nextStateProc(tr, start, tr->cur, ctx);
+            nextStateProc(tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur);
             temp = dfs_stack_pop(tr->tempstack);
             if(temp != NULL) { // Next state exists
                 valid = true;
@@ -259,8 +274,8 @@ DF_next(tr_context_t* tr, void* ctx) { // depth first extension of CVs
             // therefore they are not removed from extendable
             else if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) > 0) {
                 tr->infinite[tr->cur] = true;
-                tr->extendable[tr->cur] = false;
-                tr->extendable_count--;
+                tr->blocked[tr->cur] = true;
+                mark_not_extendable(tr, tr->cur);
             }
         }
 
@@ -294,14 +309,8 @@ commute_last(int CV1, tr_context_t* tr) {
             last_state(tr->CVs[CV2][CV1]),
             tr->nslots*sizeof(int)
         ) != 0) {
-            if(tr->extendable[CV1] == true) {
-                tr->extendable[CV1] = false;
-                tr->extendable_count--;
-            }
-            if(tr->extendable[CV2] == true) {
-                tr->extendable[CV2] = false;
-                tr->extendable_count--;
-            }
+            mark_not_extendable(tr, CV1);
+            mark_not_extendable(tr, CV2);
         }
     }
 }
@@ -347,42 +356,18 @@ commute_nonlast(
 
             temp = temp2;
             tr->temp3 = tr->res1;
-
-            // Save (a,res1) to temp vector
-            // stack_push(tr, tr->tempCVs[CV2], a, tr->res1);
         }
     }
 
     return true;
 }
 
-
-void // Concatenate CV1 and CV2
-concatenate(model_t self, tr_context_t* tr, void* ctx, int CV1, int CV2) {
-    if(dfs_stack_size(tr->CVs[CV2][CV2]) == 0) {
-        return;
-    }
-    else if(dfs_stack_size(tr->CVs[CV1][CV1]) == 0) {
-        stack_push(
-            tr,
-            tr->CVs[CV1][CV2],
-            last_trans(tr->CVs[CV2][CV2]),
-            last_state(tr->CVs[CV2][CV2])
-        );
-        return;
-    }
-    else {
-        int* s = last_state(tr->CVs[CV1][CV1]);
-        int t = get_trans(dfs_stack_top(tr->CVs[CV2][CV2]));
-        GBgetTransitionsLong(tr->model, t, s, tempstack_push, ctx);
-        pop_temp_to_CV(tr, CV1, CV2); //TODO: wat als geen transitie
-    }
-}
-
 void
 extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
     // extend CV itself
     stack_push(tr, tr->CVs[CV][CV], t, s);
+
+    //fprintf(stderr, "process %i heeft lengte %lu\n", CV, dfs_stack_size(tr->CVs[CV][CV]));
 
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV) continue;
@@ -404,7 +389,7 @@ extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
             pop_temp_to_CV(tr, CV2, CV);
         }
         else{
-            tr->CVs[CV2][CV] = tr->CVs[CV][CV]; // TODO moet wel  tr->CVs[CV][CV] al gefixt zijn.
+            tr->CVs[CV2][CV] = tr->CVs[CV][CV];
         }
     }
 }
@@ -413,37 +398,28 @@ void
 init(tr_context_t *tr, model_t self, int *src, void *ctx) {
     tr->cur = 0;
     tr->src = src;
-    for(int i = 0; i < tr->nprocs; i++) { tr->infinite[i] = false; }
     tr->extendable_count = tr->nprocs;
 
     // Add first next state for all processes
     for(int i = 0; i < tr->nprocs; i++) {
-        nextStateProc(tr, src, i, ctx);
-        //pop_temp_to_CV(tr, i, i);
+        nextStateProc(tr, src, i);
         tr->extendable[i] = true;
+        //pop_temp_to_CV(tr, i, i);
         int* temp = pop_temp(tr);
-
-        extendCV(tr, i, *temp, temp+1, self, ctx);
-    }
-
-    /*for(int i = 0; i < tr->nprocs; i++) {
-        for(int j = 0; j < tr->nprocs; j++) {
-            if(i != j) {
-                // Initialize all combinations of CVs
-                concatenate(self, tr, ctx, i, j);
-            }
+        if(temp) extendCV(tr, i, *temp, temp+1, self, ctx);
+        if(dfs_stack_size(tr->CVs[i][i]) == 0) { // Initially empty
+            tr->infinite[i] = true;
+            tr->blocked[i] = true;
+            mark_not_extendable(tr, i);
         }
-    }*/
+        else {
+            tr->infinite[i] = false;
+            tr->blocked[i] = false;
+        }
+    }
 
     for(int i = 0; i < tr->nprocs; i++) {
         commute_last(i, tr);
-    }
-}
-
-void
-clean_temps(tr_context_t* tr) {
-    for(int i = 0; i < tr->nprocs; i++) {
-        dfs_stack_clear(tr->tempCVs[i]);
     }
 }
 
@@ -456,9 +432,31 @@ check_internal_loop(tr_context_t* tr, int CV) {
         int* cur = get_state(dfs_stack_index(tr->CVs[CV][CV], i));
         if(memcmp(cur, last, tr->nslots*sizeof(int)) != 0) {
             tr->infinite[CV] = true;
-            tr->extendable[CV] = false;
-            tr->extendable_count--;
+            mark_not_extendable(tr, CV);
             return;
+        }
+    }
+}
+
+void
+check_blocked(int t, tr_context_t* tr) {
+    // Check if this thread is now blocked
+    nextStateProc(tr, last_state(tr->CVs[t][t]), t);
+    int *temp = dfs_stack_pop(tr->tempstack);
+    if(temp == NULL) { // Next state does not exist
+        tr->blocked[t] = true;
+        mark_not_extendable(tr, t);
+    }
+
+    // Check if this thread has now enabled others
+    for(int t2 = 0; t2 < tr->nprocs; t2++) {
+        if(t2 != t && tr->blocked[t2]) {
+            nextStateProc(tr, last_state(tr->CVs[t2][t2]), t2);
+            temp = dfs_stack_pop(tr->tempstack);
+            if(temp != NULL) { // Next state exists
+                tr->blocked[t2] = false;
+                mark_not_extendable(tr, t);
+            }
         }
     }
 }
@@ -489,20 +487,22 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 
     while(tr->extendable_count > 0) {
         int* temp = RR_next(tr, ctx);
+        fprintf(stderr, "cur is %i\n", tr->cur);
         // temp = DF_next(tr, ctx);
-        if(temp == NULL) break; // All processes either not extendable or blocking
+        if(temp == NULL) {
+            break; // All processes either not extendable or blocking
+        }
 
         int next_t = get_trans(temp);
         int* next_s = get_state(temp);
 
         if(!commute_nonlast(tr->cur, next_t, tr, self, ctx)) {
-            clean_temps(tr);
-            tr->extendable[tr->cur] = false;
-            tr->extendable--;
+            mark_not_extendable(tr, tr->cur);
         }
         else {
             extendCV(tr, tr->cur, next_t, next_s, self, ctx);
             commute_last(tr->cur, tr);
+            check_blocked(tr->cur, tr);
             check_internal_loop(tr, tr->cur);
         }
     }
@@ -544,6 +544,7 @@ pins2pins_tr (model_t model)
     tr->tempstack = dfs_stack_create(tr->nslots+1);
     tr->extendable = (bool*) malloc(tr->nprocs * sizeof(bool));
     tr->infinite = (bool*) malloc(tr->nprocs * sizeof(bool));
+    tr->blocked = (bool*) malloc(tr->nprocs * sizeof(bool));
 
     // Temp vectors
     tr->temp3 = (int*) malloc(tr->nslots * sizeof(int));
