@@ -119,6 +119,14 @@ tr_add_leap_groups(tr_context_t *tr, model_t por_model, model_t pre_por)
     GBsetDMInfoRead (por_model, dm);
 }
 
+void log_state(tr_context_t *tr, int* state) {
+    fprintf(stderr, "State: \n");
+    for(int i = 0; i < tr->nslots; i++) {
+        fprintf(stderr, "%d: %d\n", i, state[i]);
+    }
+    fprintf(stderr, "\n");
+}
+
 // CV ACCESS
 // ============================================================================
 int* get_state(int* elem) { return elem+1; }
@@ -228,14 +236,12 @@ RR_next(tr_context_t* tr) { // Round robin extensions of CVs
 
         // can't select non extendable process
         if(tr->extendable[tr->cur]) {
+            log_state(tr, last_state(tr->CVs[tr->cur][tr->cur]));
             nextStateProc(tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur);
-            temp = dfs_stack_pop(tr->tempstack);
+            temp = pop_temp(tr);
             if(temp != NULL) { // Next state exists
                 valid = true;
             }
-            // Blocking: not extendable, and infinite
-            // Processes with an empty prefix cannot be dependent on other transitions,
-            // therefore they are not removed from extendable
             else if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) > 0) {
                 tr->blocked[tr->cur] = true;
                 mark_not_extendable(tr, tr->cur);
@@ -263,9 +269,6 @@ DF_next(tr_context_t* tr) { // depth first extension of CVs
             if(temp != NULL) { // Next state exists
                 valid = true;
             }
-            // Blocking: not extendable, and infinite
-            // Processes with an empty prefix cannot be dependent on other transitions,
-            // therefore they are not removed from extendable
             else if(dfs_stack_size(tr->CVs[tr->cur][tr->cur]) > 0) {
                 tr->infinite[tr->cur] = true;
                 tr->blocked[tr->cur] = true;
@@ -492,6 +495,7 @@ int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
+    log_state(tr, src);
 	// CV ALGO
 	// ===========================================================================
     init(tr, self, src, ctx);
