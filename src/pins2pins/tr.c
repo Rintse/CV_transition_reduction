@@ -152,7 +152,6 @@ stack_push(tr_context_t* tr, dfs_stack_t* stack, int t, int* s) {
     memcpy(temp+1, s, tr->nslots*sizeof(int));
 }
 
-
 bool
 pop_temp_to_CV(tr_context_t* tr, int i, int j) {
     if(dfs_stack_size(tr->tempstack) == 0) {
@@ -194,7 +193,7 @@ pop_temp_transition(tr_context_t* tr) {
 void
 tempstack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
     tr_context_t *tr = (tr_context_t*) context;
-    Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
+    //Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
 
     stack_push(tr, tr->tempstack, ti->group, dst);
 }
@@ -378,7 +377,11 @@ extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
             pop_temp_to_CV(tr, CV2, CV);
         }
         else {
-            tr->CVs[CV2][CV] = tr->CVs[CV][CV];
+            dfs_stack_clear(tr->CVs[CV2][CV]); // TODO: optimisze
+            for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV]); i++) {
+                int* temp = dfs_stack_index(tr->CVs[CV][CV], i);
+                stack_push(tr, tr->CVs[CV2][CV], get_trans(temp), get_state(temp));
+            }
         }
     }
 }
@@ -479,6 +482,38 @@ int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
+    fprintf(stderr, "getting successors for state:\n");
+    log_state(tr, src);
+    for(int j = 0; j < list_count(tr->procs[0].groups); j++) {
+        int g = list_get(tr->procs[0].groups, j);
+        GBgetTransitionsLong(tr->model, g, src, tempstack_push, tr);
+    }
+
+    int* temp;
+    fprintf(stderr, "callback stack contains:\n");
+    for(int i = 0; i < dfs_stack_size(tr->tempstack); i++) {
+        temp = dfs_stack_index(tr->tempstack, i);
+        log_state(tr, get_state(temp));
+    }
+
+    pop_temp(tr);
+
+    fprintf(stderr, "\ngetting successors for state:\n");
+    log_state(tr, get_state(temp));
+    for(int j = 0; j < list_count(tr->procs[0].groups); j++) {
+        int g = list_get(tr->procs[0].groups, j);
+        GBgetTransitionsLong(tr->model, g, get_state(temp), tempstack_push, tr);
+    }
+    fprintf(stderr, "callback stack contains:\n");
+    for(int i = 0; i < dfs_stack_size(tr->tempstack); i++) {
+        int* temp = dfs_stack_index(tr->tempstack, i);
+        log_state(tr, get_state(temp));
+    }
+
+    Assert(0);
+
+
+
 	// CV ALGO
 	// ===========================================================================
     init(tr, self, src, ctx);
