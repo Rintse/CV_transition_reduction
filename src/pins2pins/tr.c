@@ -31,6 +31,8 @@ typedef struct tr_ctx {
     int*            g2p;
     dfs_stack_t*    queue[2];
     int*            src;
+    int*            cur_s;
+    int             cur_t;
 
 	// Saves the cartesian vectors
     dfs_stack_t***  CVs;
@@ -143,11 +145,11 @@ void log_state(tr_context_t* tr, int* state) {
 }
 
 void print_CV(tr_context_t* tr, dfs_stack_t* CV) {
-    fprintf(stderr, "CV:\n");
+    fprintf(stderr, "========================\n");
     for(int i = 0; i < dfs_stack_size(CV); i++) {
         log_state(tr, get_state(dfs_stack_index(CV, i)));
     }
-    fprintf(stderr, "\n");
+    fprintf(stderr, "========================\n");
 }
 
 // STACK STUFF
@@ -292,6 +294,7 @@ DF_next(tr_context_t* tr) { // depth first extension of CVs
 
 void
 commute_last(int CV1, tr_context_t* tr) {
+    // fprintf(stderr, "in commmute last\n");
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV1) continue;
         // Both already not extendable: this function will do nothing
@@ -303,12 +306,17 @@ commute_last(int CV1, tr_context_t* tr) {
             continue;
         }
 
+        // fprintf(stderr, "order: %i then %i, last state:\n", CV1, CV2);
+        // log_state(tr,last_state(tr->CVs[CV1][CV2]));
+        // fprintf(stderr, "order: %i then %i, last state:\n", CV2, CV1);
+        // log_state(tr,last_state(tr->CVs[CV2][CV1]));
+
         if(memcmp(
             last_state(tr->CVs[CV1][CV2]),
             last_state(tr->CVs[CV2][CV1]),
             tr->nslots*sizeof(int)
         ) != 0) {
-            fprintf(stderr, "Does not commute with lasts\n");
+            // fprintf(stderr, "Does not commute with lasts\n");
             mark_not_extendable(tr, CV1);
             mark_not_extendable(tr, CV2);
         }
@@ -326,7 +334,6 @@ temp3 ---- (res1, res2)
 bool
 commute_nonlast(
     int CV1,
-    int t,
     tr_context_t* tr,
     model_t self,
     void* ctx
@@ -336,7 +343,7 @@ commute_nonlast(
         if(dfs_stack_size(tr->CVs[CV2][CV2]) == 0) continue;
 
         int* temp = last_state(tr->CVs[CV1][CV1]);
-        GBgetTransitionsLong(tr->model, t, temp, tempstack_push, tr);
+        GBgetTransitionsLong(tr->model, tr->cur_t, temp, tempstack_push, tr);
         pop_temp_state(tr, tr->temp3);
         int* temp2;
 
@@ -344,7 +351,7 @@ commute_nonlast(
             temp2 = get_state(dfs_stack_index(tr->CVs[CV1][CV2], i));
             int a = get_trans(dfs_stack_index(tr->CVs[CV1][CV2], i));
 
-            GBgetTransitionsLong(tr->model, t, temp2, tempstack_push, tr);
+            GBgetTransitionsLong(tr->model, tr->cur_t, temp2, tempstack_push, tr);
             pop_temp_state(tr, tr->res1);
 
             GBgetTransitionsLong(tr->model, a, tr->temp3, tempstack_push, tr);
@@ -363,38 +370,71 @@ commute_nonlast(
 }
 
 void
-extendCV(tr_context_t* tr, int CV, int t, int* s, model_t self, void* ctx) {
-    // extend CV itself
-    stack_push(tr, tr->CVs[CV][CV], t, s);
+fill_CVs(tr_context_t* tr, int CV, int CV2) {
+    // [CV2][CV]
+    GBgetTransitionsLong(tr->model, tr->cur_t, last_state(tr->CVs[CV2][CV2]), tempstack_push, tr);
+    pop_temp_to_CV(tr, CV2, CV);
+
+    // [CV][CV2]
+    int* temp = tr->cur_s;
+    for(int i = 0; i < dfs_stack_size(tr->CVs[CV2][CV2]); i++) {
+        int a = get_trans(dfs_stack_index(tr->CVs[CV2][CV2], i));
+        GBgetTransitionsLong(tr->model, a, temp, tempstack_push, tr);
+        pop_temp_to_CV(tr, CV, CV2);
+        temp = last_state(tr->CVs[CV][CV2]);
+    }
+}
+
+void
+extendCV(tr_context_t* tr, int CV, model_t self, void* ctx) {
+    fprintf(stderr, "Extending %i\n", CV);
+
+    stack_push(tr, tr->CVs[CV][CV], tr->cur_t, tr->cur_s);
 
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV) continue;
-        // replace (a,s) with (a, t(s))
-        for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV2]); i++) {
-            int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
-            // Get t(s)
-            GBgetTransitionsLong(tr->model, t, get_state(item), tempstack_push, tr);
-            pop_temp_state(tr, tr->res1);
-            // Replace s with t(s)
-            memcpy(item+1, tr->res1, tr->nslots*sizeof(int));
-        }
 
-        // extend with the new transition
-        if(dfs_stack_size(tr->CVs[CV2][CV2]) != 0){
-            int* start = dfs_stack_size(tr->CVs[CV2][CV]) == 0 ?
-                            last_state(tr->CVs[CV2][CV2]) : last_state(tr->CVs[CV2][CV]);
-            GBgetTransitionsLong(tr->model, t, start, tempstack_push, tr);
+        // This extension causes both CV and CV2 to be non-empty
+        if(dfs_stack_size(tr->CVs[CV][CV]) == 1 && dfs_stack_size(tr->CVs[CV2][CV2]) != 0) {
+            fill_CVs(tr, CV, CV2);
+        }
+        // CV is non-empty because of current extionsion, only check CV2
+        else if(dfs_stack_size(tr->CVs[CV2][CV2]) != 0) { //update
+            // replace (a,s) with (a, t(s))
+            for(int i = 0; i < ((int)dfs_stack_size(tr->CVs[CV][CV2]))-1; i++) {
+                int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
+                // Get t(s)
+                GBgetTransitionsLong(tr->model, tr->cur_t, get_state(item), tempstack_push, tr);
+                // Replace s with t(s)
+                memcpy(get_state(item), last_state(tr->tempstack), tr->nslots*sizeof(int));
+                dfs_stack_pop(tr->tempstack);
+            }
+            // Except for the last transition, develop from the end of [CV][CV2]
+            int a = last_trans(tr->CVs[CV][CV2]);
+            int* start = dfs_stack_size(tr->CVs[CV][CV2]) == 1 ?
+            last_state(tr->CVs[CV][CV]) : last_state(tr->CVs[CV][CV2]);
+            GBgetTransitionsLong(tr->model, a, start, tempstack_push, tr);
+            pop_temp_to_CV(tr, CV, CV2);
+
+            // Extend with t
+            GBgetTransitionsLong(tr->model, tr->cur_t, last_state(tr->CVs[CV2][CV]), tempstack_push, tr);
             pop_temp_to_CV(tr, CV2, CV);
         }
-        else {
-            dfs_stack_clear(tr->CVs[CV2][CV]); // TODO: optimisze
-            for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV]); i++) {
-                int* temp = dfs_stack_index(tr->CVs[CV][CV], i);
-                stack_push(tr, tr->CVs[CV2][CV], get_trans(temp), get_state(temp));
-            }
-        }
+    }
+
+    fprintf(stderr, "CVs[%i][%i]: \n", CV, CV);
+    print_CV(tr, tr->CVs[CV][CV]);
+
+    for(int i = 0; i < tr->nprocs; i++) {
+        if(i == CV) continue;
+        fprintf(stderr, "CVs[%i][%i]:\n", CV, i);
+        print_CV(tr, tr->CVs[CV][i]);
+
+        fprintf(stderr, "CVs[%i][%i]:\n", i, CV);
+        print_CV(tr, tr->CVs[i][CV]);
     }
 }
+
 
 void
 clean_CVs(tr_context_t *tr) {
@@ -414,12 +454,15 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
 
     // Add first next state for all processes
     for(int i = 0; i < tr->nprocs; i++) {
-        nextStateProc(tr, src, i);
         tr->extendable[i] = true;
+        nextStateProc(tr, src, i);
         int* temp = pop_temp(tr);
 
         if(temp) { // Initially empty
-            extendCV(tr, i, get_trans(temp), get_state(temp), self, ctx);
+            memcpy(tr->cur_s, get_state(temp), tr->nslots*sizeof(int));
+            tr->cur_t = get_trans(temp);
+
+            extendCV(tr, i, self, ctx);
             tr->infinite[i] = false;
             tr->blocked[i] = false;
         }
@@ -477,12 +520,14 @@ check_blocked(int t, tr_context_t* tr) {
 
 void
 return_states(tr_context_t* tr) {
+    fprintf(stderr, "Emitting states: \n");
     for(int i = 0; i < tr->nprocs; i++) {
         // Do not return states marked as infinite
         if(tr->infinite[i]) continue;
 
         // Otherwise, return the final state
         transition_info_t ti = GB_TI(NULL, tr->group_start+i);
+        log_state(tr, last_state(tr->CVs[i][i]));
         tr->cb_org(tr->ctx_org, &ti, last_state(tr->CVs[i][i]), NULL);
         tr->emitted++;
     }
@@ -491,8 +536,10 @@ return_states(tr_context_t* tr) {
 int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
-    fprintf(stderr, "Entered next_all\n");
+    //fprintf(stderr, "Entered next_all\n");
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
+    //fprintf(stderr, "Starting state:\n");
+    //log_state(tr, src);
 
 	// CV ALGO
 	// ===========================================================================
@@ -500,22 +547,21 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 
     while(tr->extendable_count > 0) {
         int* temp = RR_next(tr);
-        fprintf(stderr, "cur is %i\n", tr->cur);
-        log_state(tr, temp+1);
+        //fprintf(stderr, "cur is %i\n", tr->cur);
 
         if(!temp) {
-            fprintf(stderr, "Nothing to extend\n");
+            //fprintf(stderr, "Nothing to extend\n");
             break; // All processes either not extendable or blocking
         }
 
-        int next_t = get_trans(temp);
-        int* next_s = get_state(temp);
+        tr->cur_t = get_trans(temp);
+        memcpy(tr->cur_s, get_state(temp), tr->nslots*sizeof(int));
 
-        if(!commute_nonlast(tr->cur, next_t, tr, self, ctx)) {
+        if(!commute_nonlast(tr->cur, tr, self, ctx)) {
             mark_not_extendable(tr, tr->cur);
         }
         else {
-            extendCV(tr, tr->cur, next_t, next_s, self, ctx);
+            extendCV(tr, tr->cur, self, ctx);
             commute_last(tr->cur, tr);
             check_blocked(tr->cur, tr);
             check_internal_loop(tr, tr->cur);
@@ -523,14 +569,17 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     }
 	// ===========================================================================
 
-    print_CV(tr, tr->CVs[0][0]);
+    // for(int i = 0; i < tr->nprocs; i++) {
+    //     fprintf(stderr, "%i: ", i);
+    //     print_CV(tr, tr->CVs[i][i]);
+    // }
 
     // Forward the next selected successor states to the algorithm:
     tr->cb_org = cb;
     tr->ctx_org = ctx;
     tr->emitted = 0;
     return_states(tr);
-    fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
+    //fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
     return tr->emitted;
 }
 
@@ -566,6 +615,7 @@ pins2pins_tr (model_t model)
     tr->temp3 = (int*) malloc(tr->nslots * sizeof(int));
     tr->res1 = (int*) malloc(tr->nslots * sizeof(int));
     tr->res2 = (int*) malloc(tr->nslots * sizeof(int));
+    tr->cur_s = (int*) malloc(tr->nslots * sizeof(int));
 
 	// create fresh PINS model
     model_t pormodel = GBcreateBase();
