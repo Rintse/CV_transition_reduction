@@ -239,16 +239,13 @@ RR_next(tr_context_t* tr) { // Round robin extensions of CVs
         tr->cur = (tr->cur + 1) % tr->nprocs;
 
         // can't select non extendable process
-        fprintf(stderr, "RR trying %i\n", tr->cur);
         if(tr->extendable[tr->cur]) {
             nextStateProc(tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur);
             temp = pop_temp(tr);
             if(temp) { // Next state exists
-                fprintf(stderr, "Found successor\n");
                 valid = true;
             }
             else {
-                fprintf(stderr, "No successor\n");
                 tr->blocked[tr->cur] = true;
                 mark_not_extendable(tr, tr->cur);
             }
@@ -306,11 +303,6 @@ commute_last(int CV1, tr_context_t* tr) {
             continue;
         }
 
-        // fprintf(stderr, "order: %i then %i, last state:\n", CV1, CV2);
-        // log_state(tr,last_state(tr->CVs[CV1][CV2]));
-        // fprintf(stderr, "order: %i then %i, last state:\n", CV2, CV1);
-        // log_state(tr,last_state(tr->CVs[CV2][CV1]));
-
         if(memcmp(
             last_state(tr->CVs[CV1][CV2]),
             last_state(tr->CVs[CV2][CV1]),
@@ -361,8 +353,8 @@ commute_nonlast(
                 return false;
             }
 
-            temp = temp2;
-            tr->temp3 = tr->res1;
+            memcpy(temp, temp2, tr->nslots*sizeof(int));
+            memcpy(tr->temp3, tr->res1, tr->nslots*sizeof(int));
         }
     }
 
@@ -387,8 +379,6 @@ fill_CVs(tr_context_t* tr, int CV, int CV2) {
 
 void
 extendCV(tr_context_t* tr, int CV, model_t self, void* ctx) {
-    fprintf(stderr, "Extending %i\n", CV);
-
     stack_push(tr, tr->CVs[CV][CV], tr->cur_t, tr->cur_s);
 
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
@@ -411,27 +401,19 @@ extendCV(tr_context_t* tr, int CV, model_t self, void* ctx) {
             }
             // Except for the last transition, develop from the end of [CV][CV2]
             int a = last_trans(tr->CVs[CV][CV2]);
-            int* start = dfs_stack_size(tr->CVs[CV][CV2]) == 1 ?
-            last_state(tr->CVs[CV][CV]) : last_state(tr->CVs[CV][CV2]);
+            int* start = dfs_stack_size(tr->CVs[CV][CV2]) == 1 ? last_state(tr->CVs[CV][CV])
+            : get_state(dfs_stack_index(tr->CVs[CV][CV2], dfs_stack_size(tr->CVs[CV][CV2])-2));
             GBgetTransitionsLong(tr->model, a, start, tempstack_push, tr);
-            pop_temp_to_CV(tr, CV, CV2);
+            if(dfs_stack_size(tr->tempstack) != 0) {
+                memcpy(last_state(tr->CVs[CV][CV2]),
+                last_state(tr->tempstack), tr->nslots*sizeof(int));
+                pop_temp(tr);
+            }
 
             // Extend with t
             GBgetTransitionsLong(tr->model, tr->cur_t, last_state(tr->CVs[CV2][CV]), tempstack_push, tr);
             pop_temp_to_CV(tr, CV2, CV);
         }
-    }
-
-    fprintf(stderr, "CVs[%i][%i]: \n", CV, CV);
-    print_CV(tr, tr->CVs[CV][CV]);
-
-    for(int i = 0; i < tr->nprocs; i++) {
-        if(i == CV) continue;
-        fprintf(stderr, "CVs[%i][%i]:\n", CV, i);
-        print_CV(tr, tr->CVs[CV][i]);
-
-        fprintf(stderr, "CVs[%i][%i]:\n", i, CV);
-        print_CV(tr, tr->CVs[i][CV]);
     }
 }
 
@@ -520,7 +502,6 @@ check_blocked(int t, tr_context_t* tr) {
 
 void
 return_states(tr_context_t* tr) {
-    fprintf(stderr, "Emitting states: \n");
     for(int i = 0; i < tr->nprocs; i++) {
         // Do not return states marked as infinite
         if(tr->infinite[i]) continue;
@@ -536,10 +517,7 @@ return_states(tr_context_t* tr) {
 int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
-    //fprintf(stderr, "Entered next_all\n");
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
-    //fprintf(stderr, "Starting state:\n");
-    //log_state(tr, src);
 
 	// CV ALGO
 	// ===========================================================================
@@ -547,10 +525,8 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 
     while(tr->extendable_count > 0) {
         int* temp = RR_next(tr);
-        //fprintf(stderr, "cur is %i\n", tr->cur);
 
         if(!temp) {
-            //fprintf(stderr, "Nothing to extend\n");
             break; // All processes either not extendable or blocking
         }
 
@@ -579,7 +555,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     tr->ctx_org = ctx;
     tr->emitted = 0;
     return_states(tr);
-    //fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
+    fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
     return tr->emitted;
 }
 
