@@ -119,14 +119,6 @@ tr_add_leap_groups(tr_context_t *tr, model_t por_model, model_t pre_por)
     GBsetDMInfoRead (por_model, dm);
 }
 
-void log_state(tr_context_t *tr, int* state) {
-    fprintf(stderr, "State: \n");
-    for(int i = 0; i < tr->nslots; i++) {
-        fprintf(stderr, "%d: %d\n", i, state[i]);
-    }
-    fprintf(stderr, "\n");
-}
-
 // CV ACCESS
 // ============================================================================
 int* get_state(int* elem) { return elem+1; }
@@ -142,6 +134,21 @@ last_trans(dfs_stack_t* s) {
     return get_trans(dfs_stack_top(s));
 }
 
+void log_state(tr_context_t* tr, int* state) {
+    fprintf(stderr, "State: \n");
+    for(int i = 0; i < tr->nslots; i++) {
+        fprintf(stderr, "%d: %d\n", i, state[i]);
+    }
+    fprintf(stderr, "\n");
+}
+
+void print_CV(tr_context_t* tr, dfs_stack_t* CV) {
+    fprintf(stderr, "CV:\n");
+    for(int i = 0; i < dfs_stack_size(CV); i++) {
+        log_state(tr, get_state(dfs_stack_index(CV, i)));
+    }
+    fprintf(stderr, "\n");
+}
 
 // STACK STUFF
 // ============================================================================
@@ -193,7 +200,7 @@ pop_temp_transition(tr_context_t* tr) {
 void
 tempstack_push(void* context, transition_info_t* ti, int* dst, int* cpy) {
     tr_context_t *tr = (tr_context_t*) context;
-    //Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
+    Assert(dfs_stack_size(tr->tempstack) == 0, "Radical! Non-determinism found.");
 
     stack_push(tr, tr->tempstack, ti->group, dst);
 }
@@ -230,20 +237,22 @@ RR_next(tr_context_t* tr) { // Round robin extensions of CVs
         tr->cur = (tr->cur + 1) % tr->nprocs;
 
         // can't select non extendable process
+        fprintf(stderr, "RR trying %i\n", tr->cur);
         if(tr->extendable[tr->cur]) {
-            //log_state(tr, last_state(tr->CVs[tr->cur][tr->cur]));
             nextStateProc(tr, last_state(tr->CVs[tr->cur][tr->cur]), tr->cur);
             temp = pop_temp(tr);
             if(temp) { // Next state exists
+                fprintf(stderr, "Found successor\n");
                 valid = true;
             }
             else {
+                fprintf(stderr, "No successor\n");
                 tr->blocked[tr->cur] = true;
                 mark_not_extendable(tr, tr->cur);
             }
         }
         // All processes are not extendable or blocked
-        if(++tried == tr->nprocs) {
+        if(!valid && ++tried == tr->nprocs) {
             return NULL;
         }
     }
@@ -299,6 +308,7 @@ commute_last(int CV1, tr_context_t* tr) {
             last_state(tr->CVs[CV2][CV1]),
             tr->nslots*sizeof(int)
         ) != 0) {
+            fprintf(stderr, "Does not commute with lasts\n");
             mark_not_extendable(tr, CV1);
             mark_not_extendable(tr, CV2);
         }
@@ -432,7 +442,7 @@ check_internal_loop(tr_context_t* tr, int CV) {
     int* last = last_state(tr->CVs[CV][CV]);
     for(int i = 0; i < dfs_stack_size(tr->CVs[CV][CV])-1; i++) {
         int* cur = get_state(dfs_stack_index(tr->CVs[CV][CV], i));
-        if(memcmp(cur, last, tr->nslots*sizeof(int)) != 0) {
+        if(memcmp(cur, last, tr->nslots*sizeof(int)) == 0) {
             tr->infinite[CV] = true;
             mark_not_extendable(tr, CV);
             return;
@@ -481,38 +491,8 @@ return_states(tr_context_t* tr) {
 int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
+    fprintf(stderr, "Entered next_all\n");
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
-    fprintf(stderr, "getting successors for state:\n");
-    log_state(tr, src);
-    for(int j = 0; j < list_count(tr->procs[0].groups); j++) {
-        int g = list_get(tr->procs[0].groups, j);
-        GBgetTransitionsLong(tr->model, g, src, tempstack_push, tr);
-    }
-
-    int* temp;
-    fprintf(stderr, "callback stack contains:\n");
-    for(int i = 0; i < dfs_stack_size(tr->tempstack); i++) {
-        temp = dfs_stack_index(tr->tempstack, i);
-        log_state(tr, get_state(temp));
-    }
-
-    pop_temp(tr);
-
-    fprintf(stderr, "\ngetting successors for state:\n");
-    log_state(tr, get_state(temp));
-    for(int j = 0; j < list_count(tr->procs[0].groups); j++) {
-        int g = list_get(tr->procs[0].groups, j);
-        GBgetTransitionsLong(tr->model, g, get_state(temp), tempstack_push, tr);
-    }
-    fprintf(stderr, "callback stack contains:\n");
-    for(int i = 0; i < dfs_stack_size(tr->tempstack); i++) {
-        int* temp = dfs_stack_index(tr->tempstack, i);
-        log_state(tr, get_state(temp));
-    }
-
-    Assert(0);
-
-
 
 	// CV ALGO
 	// ===========================================================================
@@ -521,8 +501,10 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     while(tr->extendable_count > 0) {
         int* temp = RR_next(tr);
         fprintf(stderr, "cur is %i\n", tr->cur);
-        // temp = DF_next(tr);
+        log_state(tr, temp+1);
+
         if(!temp) {
+            fprintf(stderr, "Nothing to extend\n");
             break; // All processes either not extendable or blocking
         }
 
@@ -540,6 +522,8 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
         }
     }
 	// ===========================================================================
+
+    print_CV(tr, tr->CVs[0][0]);
 
     // Forward the next selected successor states to the algorithm:
     tr->cb_org = cb;
