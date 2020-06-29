@@ -290,6 +290,64 @@ DF_next(tr_context_t* tr) { // depth first extension of CVs
 // ============================================================================
 
 void
+fill_hcube(tr_context_t* tr, int CV, int CV2) {
+    // [CV2][CV]
+    GBgetTransitionsLong(tr->model, tr->cur_t, last_state(tr->CVs[CV2][CV2]), tempstack_push, tr);
+    pop_temp_to_CV(tr, CV2, CV);
+
+    // [CV][CV2]
+    int* temp = tr->cur_s;
+    for(int i = 0; i < dfs_stack_size(tr->CVs[CV2][CV2]); i++) {
+        int a = get_trans(dfs_stack_index(tr->CVs[CV2][CV2], i));
+        GBgetTransitionsLong(tr->model, a, temp, tempstack_push, tr);
+        pop_temp_to_CV(tr, CV, CV2);
+        temp = last_state(tr->CVs[CV][CV2]);
+    }
+}
+
+void
+extend_hcube(tr_context_t* tr, int CV, int CV2) {
+    // replace (a,s) with (a, t(s))
+    for(int i = 0; i < ((int)dfs_stack_size(tr->CVs[CV][CV2])); i++) {
+        int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
+        // Get t(s)
+        GBgetTransitionsLong(tr->model, tr->cur_t, get_state(item), tempstack_push, tr);
+        // Replace s with t(s)
+        memcpy(get_state(item), last_state(tr->tempstack), tr->nslots*sizeof(int));
+        dfs_stack_pop(tr->tempstack);
+    }
+
+    // Extend with t
+    GBgetTransitionsLong(tr->model, tr->cur_t, last_state(tr->CVs[CV2][CV]), tempstack_push, tr);
+    pop_temp_to_CV(tr, CV2, CV);
+}
+
+void
+update_hcube(tr_context_t* tr, int CV, int CV2) {
+    if(!tr->extendable[CV2]) { return; }
+
+    // This extension causes both CV and CV2 to be non-empty
+    if(dfs_stack_size(tr->CVs[CV][CV]) == 1 && dfs_stack_size(tr->CVs[CV2][CV2]) != 0) {
+        fill_hcube(tr, CV, CV2);
+    }
+    // CV is non-empty because of current extionsion, only check CV2
+    else if(dfs_stack_size(tr->CVs[CV2][CV2]) != 0) { //update
+        extend_hcube(tr, CV, CV2);
+    }
+
+    // for(int i = 0; i < tr->nprocs; i++) {
+    //     for(int j = 0; j < tr->nprocs; j++) {
+    //         fprintf(stderr, "CV %i %i\n", i, j);
+    //         print_CV(tr, tr->CVs[i][j]);
+    //         fprintf(stderr, "\n");
+    //     }
+    // }
+    //
+    // fprintf(stderr, "\n\n\n");
+}
+
+
+void
 commute_last(int CV1, tr_context_t* tr) {
     // fprintf(stderr, "in commmute last\n");
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
@@ -305,8 +363,6 @@ commute_last(int CV1, tr_context_t* tr) {
         if(dfs_stack_size(tr->CVs[CV1][CV1]) > 1) {
             if(dfs_stack_size(tr->CVs[CV1][CV2]) == 0 ||
             dfs_stack_size(tr->CVs[CV2][CV1]) == 0) {
-                mark_not_extendable(tr, CV1);
-                mark_not_extendable(tr, CV2);
                 continue;
             }
         }
@@ -318,8 +374,6 @@ commute_last(int CV1, tr_context_t* tr) {
         GBgetTransitionsLong(tr->model, tr->cur_t, start, tempstack_push, tr);
 
         if(!pop_temp_state(tr, tr->res1)) {
-            mark_not_extendable(tr, CV1);
-            mark_not_extendable(tr, CV2);
             continue;
         }
 
@@ -336,6 +390,7 @@ commute_last(int CV1, tr_context_t* tr) {
                 );
             }
             else {
+                if(dfs_stack_size(tr->CVs[CV1][CV2]) < 2) continue;
                 GBgetTransitionsLong(
                     tr->model, tr->cur_t,
                     get_state(dfs_stack_index(tr->CVs[CV1][CV2], dfs_stack_size(tr->CVs[CV1][CV2])-2)),
@@ -344,8 +399,6 @@ commute_last(int CV1, tr_context_t* tr) {
             }
 
             if(!pop_temp_state(tr, tr->temp3)) {
-                mark_not_extendable(tr, CV1);
-                mark_not_extendable(tr, CV2);
                 continue;
             }
         }
@@ -354,15 +407,15 @@ commute_last(int CV1, tr_context_t* tr) {
         GBgetTransitionsLong(tr->model, a, tr->temp3, tempstack_push, tr);
 
         if(!pop_temp_state(tr, tr->res2)) {
-            mark_not_extendable(tr, CV1);
-            mark_not_extendable(tr, CV2);
             continue;
         }
 
         if(memcmp(tr->res1, tr->res2, tr->nslots*sizeof(int)) != 0) {
-        // fprintf(stderr, "Does not commute with lasts\n");
             mark_not_extendable(tr, CV1);
             mark_not_extendable(tr, CV2);
+        }
+        else {
+            update_hcube(tr, CV1, CV2);
         }
     }
 }
@@ -413,65 +466,6 @@ commute_nonlast(
     return true;
 }
 
-void
-fill_hcube(tr_context_t* tr, int CV, int CV2) {
-    // [CV2][CV]
-    GBgetTransitionsLong(tr->model, tr->cur_t, last_state(tr->CVs[CV2][CV2]), tempstack_push, tr);
-    pop_temp_to_CV(tr, CV2, CV);
-
-    // [CV][CV2]
-    int* temp = tr->cur_s;
-    for(int i = 0; i < dfs_stack_size(tr->CVs[CV2][CV2]); i++) {
-        int a = get_trans(dfs_stack_index(tr->CVs[CV2][CV2], i));
-        GBgetTransitionsLong(tr->model, a, temp, tempstack_push, tr);
-        pop_temp_to_CV(tr, CV, CV2);
-        temp = last_state(tr->CVs[CV][CV2]);
-    }
-}
-
-void
-extend_hcube(tr_context_t* tr, int CV, int CV2) {
-    // replace (a,s) with (a, t(s))
-    for(int i = 0; i < ((int)dfs_stack_size(tr->CVs[CV][CV2])); i++) {
-        int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
-        // Get t(s)
-        GBgetTransitionsLong(tr->model, tr->cur_t, get_state(item), tempstack_push, tr);
-        // Replace s with t(s)
-        memcpy(get_state(item), last_state(tr->tempstack), tr->nslots*sizeof(int));
-        dfs_stack_pop(tr->tempstack);
-    }
-
-    // Extend with t
-    GBgetTransitionsLong(tr->model, tr->cur_t, last_state(tr->CVs[CV2][CV]), tempstack_push, tr);
-    pop_temp_to_CV(tr, CV2, CV);
-}
-
-void
-update_hcube(tr_context_t* tr, int CV, model_t self) {
-    for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
-        if(CV2 == CV) continue;
-        //if(!tr->extendable[CV2]) {fprintf(stderr, "happen?\n" );continue;}
-
-        // This extension causes both CV and CV2 to be non-empty
-        if(dfs_stack_size(tr->CVs[CV][CV]) == 1 && dfs_stack_size(tr->CVs[CV2][CV2]) != 0) {
-            fill_hcube(tr, CV, CV2);
-        }
-        // CV is non-empty because of current extionsion, only check CV2
-        else if(dfs_stack_size(tr->CVs[CV2][CV2]) != 0) { //update
-            extend_hcube(tr, CV, CV2);
-        }
-    }
-
-    // for(int i = 0; i < tr->nprocs; i++) {
-    //     for(int j = 0; j < tr->nprocs; j++) {
-    //         fprintf(stderr, "CV %i %i\n", i, j);
-    //         print_CV(tr, tr->CVs[i][j]);
-    //     }
-    // }
-    //
-    // fprintf(stderr, "\n\n\n");
-}
-
 
 void
 clean_CVs(tr_context_t *tr) {
@@ -500,7 +494,6 @@ init(tr_context_t *tr, model_t self, int *src, void *ctx) {
             tr->cur_t = get_trans(temp);
             stack_push(tr, tr->CVs[i][i], tr->cur_t, tr->cur_s);
             commute_last(i, tr);
-            update_hcube(tr, i, self);
             tr->infinite[i] = false;
             tr->blocked[i] = false;
         }
@@ -570,8 +563,8 @@ int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
-    fprintf(stderr, "SRC: \n");
-    log_state(tr, src);
+    // fprintf(stderr, "SRC: \n");
+    // log_state(tr, src);
 
 	// CV ALGO
 	// ===========================================================================
@@ -591,7 +584,6 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
         else {
             stack_push(tr, tr->CVs[tr->cur][tr->cur], tr->cur_t, tr->cur_s);
             commute_last(tr->cur, tr);
-            update_hcube(tr, tr->cur, self);
             check_blocked(tr->cur, tr);
             check_internal_loop(tr, tr->cur);
         }
@@ -604,7 +596,7 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     tr->emitted = 0;
     return_states(tr);
     //fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
-    fprintf(stderr, "\n");
+    //fprintf(stderr, "\n");
     return tr->emitted;
 }
 
