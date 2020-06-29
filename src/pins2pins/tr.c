@@ -432,6 +432,7 @@ fill_hcube(tr_context_t* tr, int CV, int CV2) {
 
 void
 extend_hcube(tr_context_t* tr, int CV, int CV2) {
+    fprintf(stderr, "extending\n");
     // replace (a,s) with (a, t(s))
     for(int i = 0; i < ((int)dfs_stack_size(tr->CVs[CV][CV2])); i++) {
         int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
@@ -451,7 +452,7 @@ void
 update_hcube(tr_context_t* tr, int CV, model_t self) {
     for(int CV2 = 0; CV2 < tr->nprocs; CV2++) {
         if(CV2 == CV) continue;
-        if(!tr->extendable[CV2]) continue;
+        //if(!tr->extendable[CV2]) {fprintf(stderr, "happen?\n" );continue;}
 
         // This extension causes both CV and CV2 to be non-empty
         if(dfs_stack_size(tr->CVs[CV][CV]) == 1 && dfs_stack_size(tr->CVs[CV2][CV2]) != 0) {
@@ -462,6 +463,15 @@ update_hcube(tr_context_t* tr, int CV, model_t self) {
             extend_hcube(tr, CV, CV2);
         }
     }
+
+    for(int i = 0; i < tr->nprocs; i++) {
+        for(int j = 0; j < tr->nprocs; j++) {
+            fprintf(stderr, "CV %i %i\n", i, j);
+            print_CV(tr, tr->CVs[i][j]);
+        }
+    }
+
+    fprintf(stderr, "\n\n\n");
 }
 
 
@@ -552,7 +562,7 @@ return_states(tr_context_t* tr) {
 
         // Otherwise, return the final state
         transition_info_t ti = GB_TI(NULL, tr->group_start+i);
-        //log_state(tr, last_state(tr->CVs[i][i]));
+        log_state(tr, last_state(tr->CVs[i][i]));
         tr->cb_org(tr->ctx_org, &ti, last_state(tr->CVs[i][i]), NULL);
         tr->emitted++;
     }
@@ -562,6 +572,8 @@ int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
+    fprintf(stderr, "src: \n");
+    log_state(tr, src);
 
 	// CV ALGO
 	// ===========================================================================
