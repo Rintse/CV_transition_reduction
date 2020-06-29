@@ -137,9 +137,8 @@ last_trans(dfs_stack_t* s) {
 }
 
 void log_state(tr_context_t* tr, int* state) {
-    fprintf(stderr, "State: \n");
     for(int i = 0; i < tr->nslots; i++) {
-        fprintf(stderr, "%d: %d\n", i, state[i]);
+        fprintf(stderr, "%d,", state[i]);
     }
     fprintf(stderr, "\n");
 }
@@ -432,7 +431,6 @@ fill_hcube(tr_context_t* tr, int CV, int CV2) {
 
 void
 extend_hcube(tr_context_t* tr, int CV, int CV2) {
-    fprintf(stderr, "extending\n");
     // replace (a,s) with (a, t(s))
     for(int i = 0; i < ((int)dfs_stack_size(tr->CVs[CV][CV2])); i++) {
         int* item = dfs_stack_index(tr->CVs[CV][CV2], i);
@@ -464,14 +462,14 @@ update_hcube(tr_context_t* tr, int CV, model_t self) {
         }
     }
 
-    for(int i = 0; i < tr->nprocs; i++) {
-        for(int j = 0; j < tr->nprocs; j++) {
-            fprintf(stderr, "CV %i %i\n", i, j);
-            print_CV(tr, tr->CVs[i][j]);
-        }
-    }
-
-    fprintf(stderr, "\n\n\n");
+    // for(int i = 0; i < tr->nprocs; i++) {
+    //     for(int j = 0; j < tr->nprocs; j++) {
+    //         fprintf(stderr, "CV %i %i\n", i, j);
+    //         print_CV(tr, tr->CVs[i][j]);
+    //     }
+    // }
+    //
+    // fprintf(stderr, "\n\n\n");
 }
 
 
@@ -562,7 +560,7 @@ return_states(tr_context_t* tr) {
 
         // Otherwise, return the final state
         transition_info_t ti = GB_TI(NULL, tr->group_start+i);
-        log_state(tr, last_state(tr->CVs[i][i]));
+        //log_state(tr, last_state(tr->CVs[i][i]));
         tr->cb_org(tr->ctx_org, &ti, last_state(tr->CVs[i][i]), NULL);
         tr->emitted++;
     }
@@ -572,7 +570,7 @@ int
 tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 {
     tr_context_t *tr = (tr_context_t*) GBgetContext(self);
-    fprintf(stderr, "src: \n");
+    fprintf(stderr, "SRC: \n");
     log_state(tr, src);
 
 	// CV ALGO
@@ -605,7 +603,8 @@ tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
     tr->ctx_org = ctx;
     tr->emitted = 0;
     return_states(tr);
-    fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
+    //fprintf(stderr, "EMITTED: %lu\n",tr->emitted );
+    fprintf(stderr, "\n");
     return tr->emitted;
 }
 
