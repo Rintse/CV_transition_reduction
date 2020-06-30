@@ -14,8 +14,6 @@
 #include <util/list.h>
 #include <util/runtime.h>
 #include <util/util.h>
-#define MAX_CV_SIZE 64
-#define MAX_N_PROCS 16
 
 typedef struct tr_ctx {
     model_t         model;
