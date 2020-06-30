@@ -526,7 +526,7 @@ int tr_next_all (model_t self, int *src, TransitionCB cb, void *ctx)
 
     while(tr->extendable_count > 0) {
         // Next process, transition and state are selected (round robin/depth first)
-        int* temp = DF_next(tr);//RR_next(tr);
+        int* temp = RR_next(tr);
 
         if(!temp) break; // All processes either not extendable or blocking
 
