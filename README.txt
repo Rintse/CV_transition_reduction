@@ -1,6 +1,3 @@
-AIMC FINAL PROJECT
-Loes Dekker (s1850024) and Rintse van de Vlasakker (s1903748)
-
 To be used with LTSmin (https://github.com/utwente-fmt/ltsmin)
 Transaction reduction pins2pins layer using cartesian vectors described in
 Golan-Gueta, Guy & Flanagan, Cormac & Yahav, Eran & Sagiv, Mooly. (2007).
@@ -80,7 +77,7 @@ DF CVs		0.000	42		55		0.00
 RR CVs		0.000	47		62		0.00
 ===================================================================
 
-Our reduction layer definitely decreases the states explored, and thus the
+The reduction layer definitely decreases the states explored, and thus the
 memory used. It currently scales poorly with time however. We think a more
 optimised version might definitely be of use for model checking, but due to
 problems with the framework, we were not able to get there.
